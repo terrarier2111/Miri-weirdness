@@ -26,9 +26,9 @@ use std::pin::Pin;
 // FIXME: employ reference counting on the nodes in order for them to be dropped correctly
 #[derive(Clone)]
 pub struct AtomicDoublyLinkedList<T, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
-    header_node: Arc<RawNode<T, NODE_KIND>>,
+    header_node: Aligned<A4, Arc<RawNode<T, NODE_KIND>>>,
     // in the header node itself, the left field points to the `header_node` field of the list itself, so we don't have to maintain a reference count
-    tail_node: Arc<RawNode<T, NODE_KIND>>,
+    tail_node: Aligned<A4, Arc<RawNode<T, NODE_KIND>>>,
     // in the tail node itself, the right field points to the `tail_node` field of the list itself, so we don't have to maintain a reference count
 }
 
@@ -62,21 +62,20 @@ impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedList<T, NODE_KIND> {
         {
             unreachable!("Arc's alignment can't be evaluated statically!");
         }
-        /*
         if align_of::<Arc<Aligned<A4, AtomicDoublyLinkedListNode<T, NODE_KIND>>>>() < 4 {
             unreachable!("Arc's alignment isn't sufficient!");
-        }*/
+        }
         let ret = Arc::new(Self {
-            header_node: Arc::new(Aligned(AtomicDoublyLinkedListNode {
+            header_node: Aligned(Arc::new(Aligned(AtomicDoublyLinkedListNode {
                 val: MaybeUninit::uninit(),
                 left: Link::invalid(),
                 right: Link::invalid(),
-            })),
-            tail_node: Arc::new(Aligned(AtomicDoublyLinkedListNode {
+            }))),
+            tail_node: Aligned(Arc::new(Aligned(AtomicDoublyLinkedListNode {
                 val: MaybeUninit::uninit(),
                 left: Link::invalid(),
                 right: Link::invalid(),
-            })),
+            }))),
         });
 
         // SAFETY: we know that there are no other threads setting modifying
@@ -133,7 +132,7 @@ impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedList<T, NODE_KIND> {
                 let head = head
                     .get_ptr()
                     .cast::<RawNode<T, { NodeKind::Bound }>>();
-                let head = ManuallyDrop::new(unsafe { Arc::from_raw(head) });
+                let head = ManuallyDrop::new(Aligned(unsafe { Arc::from_raw(head) }));
                 if let Some(val) = head.remove() {
                     println!("removed head!");
                     println!("rem end head: {:?}", self.header_node.right.get().raw_ptr());
@@ -151,7 +150,7 @@ impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedList<T, NODE_KIND> {
                     .cast::<RawNode<T, { NodeKind::Unbound }>>();
                 // increase the ref count because we want to return a reference to the node and thus we have to create a reference out of thin air
                 mem::forget(unsafe { Arc::from_raw(head) });
-                let head = unsafe { Arc::from_raw(head) };
+                let head = Aligned(unsafe { Arc::from_raw(head) });
                 if let Some(val) = head.remove() {
                     println!("removed head!");
                     println!("rem end head: {:?}", self.header_node.right.get().raw_ptr());
@@ -174,7 +173,7 @@ impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedList<T, NODE_KIND> {
                     .get()
                     .get_ptr()
                     .cast::<RawNode<T, { NodeKind::Bound }>>();
-                let tail = ManuallyDrop::new(unsafe { Arc::from_raw(tail) });
+                let tail = ManuallyDrop::new(Aligned(unsafe { Arc::from_raw(tail) }));
                 if let Some(val) = tail.remove() {
                     println!("removed tail!");
                     println!("rem end head: {:?}", self.header_node.right.get().raw_ptr());
@@ -189,7 +188,7 @@ impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedList<T, NODE_KIND> {
                 let tail = tail
                     .get_ptr()
                     .cast::<RawNode<T, { NodeKind::Unbound }>>();
-                let tail = unsafe { Arc::from_raw(tail) };
+                let tail = Aligned(unsafe { Arc::from_raw(tail) });
                 // increase the ref count because we want to return a reference to the node and thus we have to create a reference out of thin air
                 mem::forget(tail.clone());
                 if let Some(val) = tail.remove() {
@@ -230,7 +229,6 @@ impl<T, const NODE_KIND: NodeKind> Drop for AtomicDoublyLinkedList<T, NODE_KIND>
         // remove all nodes in the list, when the list gets dropped,
         // this makes sure that all the nodes' state is consistent
         // and correct
-        println!("dropping list!");
         while !self.is_empty() {
             self.remove_head();
         }
@@ -269,7 +267,7 @@ pub struct AtomicDoublyLinkedListNode<
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 impl<T> AtomicDoublyLinkedListNode<T, { NodeKind::Bound }, false> {
-    pub fn remove(self: &Arc<Aligned<A4, Self>>) -> Option<Node<T, { NodeKind::Bound }, true>> {
+    pub fn remove(self: &Aligned<A4, Arc<Aligned<A4, Self>>>) -> Option<Node<T, { NodeKind::Bound }, true>> {
         // let this = Arc::as_ptr(self) as *const RawNode<T, { NodeKind::Bound }>;
         // let _tmp = self.left.get();
         // println!("_tmp interm counter: {} | curr counter: {}", _tmp.ptr.parent.intermediate_ref_cnt.load(Ordering::SeqCst), _tmp.ptr.parent.curr_ref_cnt.load(Ordering::SeqCst));
@@ -353,7 +351,7 @@ impl<T> AtomicDoublyLinkedListNode<T, { NodeKind::Bound }, false> {
 }
 
 impl<T> AtomicDoublyLinkedListNode<T, { NodeKind::Unbound }, false> {
-    pub fn remove(self: Arc<Aligned<A4, Self>>) -> Option<Node<T, { NodeKind::Bound }, true>> {
+    pub fn remove(self: Aligned<A4, Arc<Aligned<A4, Self>>>) -> Option<Node<T, { NodeKind::Bound }, true>> {
         /*fn inner_remove<T>(slf: &Arc<Aligned<A4, AtomicDoublyLinkedListNode<T, { NodeKind::Unbound }, false>>>) -> Option<()> {
             // let this = Arc::as_ptr(self) as *const RawNode<T, { NodeKind::Unbound }>;
             if slf.right.get().raw_ptr().is_null() || slf.left.get().raw_ptr().is_null() {
@@ -408,11 +406,11 @@ impl<T> AtomicDoublyLinkedListNode<T, { NodeKind::Unbound }, false> {
 
 impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NODE_KIND, false> {
     pub fn add_after(self: &Arc<Aligned<A4, Self>>, val: T) -> Node<T, NODE_KIND> {
-        let node = Arc::new/*pin*/(Aligned(AtomicDoublyLinkedListNode {
+        let node = Aligned(Arc::new/*pin*/(Aligned(AtomicDoublyLinkedListNode {
             val: MaybeUninit::new(val),
             left: Link::invalid(),
             right: Link::invalid(),
-        }));
+        })));
 
         if NODE_KIND == NodeKind::Bound {
             let _ = ManuallyDrop::new(node.clone()); // leak a single reference for when we are removing the node
@@ -431,7 +429,7 @@ impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NODE_KIND, fals
         let tmp_right = ManuallyDrop::new(unsafe { Arc::from_raw(tmp.get_ptr()) });
         // let tmp_left = ManuallyDrop::new(unsafe { Arc::from_raw(self.left.get().get_ptr().as_ref().unwrap()) });
         println!("PRE right arc refs: {}", Arc::strong_count(&tmp_right));*/
-        // let this = Arc::as_ptr(self);
+        let this = Arc::as_ptr(self);
         if self.right./*get_full()*/get().raw_ptr().is_null() {
             println!("adding beffffore!");
             // if we are the tail, add before ourselves, not after
@@ -456,17 +454,17 @@ impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NODE_KIND, fals
                 // increase the ref count by 1
                 // mem::forget(self.clone());
                 // create_ref(this);
-                // node.left.set_unsafe/*::<false>*/(this);
+                node.left.set_unsafe/*::<false>*/(this);
             }
             unsafe {
                 // create_ref(next.get_ptr()); // store_ref(node.right, <next, false>) | in iter 1: tail refs += 1
 
                 // increase the ref count by 1
                 // create_ref(next.get_ptr());
-                // node.right.set_unsafe/*::<false>*/(next.get_ptr());
+                node.right.set_unsafe/*::<false>*/(next.get_ptr());
             }
 
-            /*println!("set meta!");
+            println!("set meta!");
             if self
                 .right
                 .try_set_addr_full_with_meta(next.get_ptr(), Arc::as_ptr(node))
@@ -475,21 +473,21 @@ impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NODE_KIND, fals
                 // SAFETY: we have to create a reference to node in order ensure, that it is always valid, when it has to be
                 // unsafe { create_ref(Arc::as_ptr(node)); }
                 break;
-            }*/
+            }
             // unsafe { release_ref(next.get_ptr()); } // in iter 1: tail refs -= 1
-            /*if self.right.get_meta().get_deletion_marker() { // FIXME: err when using get() instead of get_meta()
+            if self.right.get_meta().get_deletion_marker() { // FIXME: err when using get() instead of get_meta()
                 // release_ref(node); // this is probably unnecessary, as we don't delete the node, but reuse it
                 // delete_node(node);
                 println!("adding beffffore!");
                 return self.inner_add_before(node);
-            }*/
+            }
             // back-off
             thread::sleep(Duration::from_micros(10 * back_off_weight));
             back_off_weight += 1;
         }
         println!("added after!");
         // *cursor = node;
-        // let _/*prev*/ = self.correct_prev::<false>(next.get_ptr()); // FIXME: this isn't even called until it panics, so this can't be the cause!
+        let _/*prev*/ = self.correct_prev::<false>(next.get_ptr()); // FIXME: this isn't even called until it panics, so this can't be the cause!
         // unsafe { release_ref_2(prev, next.get_ptr()); }
         /*drop(next);
         println!("right: curr refs {} | intermediate refs: {}", self.right.ptr.curr_ref_cnt.load(Ordering::SeqCst), self.right.ptr.intermediate_ref_cnt.load(Ordering::SeqCst));
@@ -502,11 +500,11 @@ impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NODE_KIND, fals
     }
 
     pub fn add_before(self: &Arc<Aligned<A4, Self>>, val: T) -> Node<T, NODE_KIND> {
-        let node = Arc::new/*pin*/(Aligned(AtomicDoublyLinkedListNode {
+        let node = Aligned(Arc::new/*pin*/(Aligned(AtomicDoublyLinkedListNode {
             val: MaybeUninit::new(val),
             left: Link::invalid(),
             right: Link::invalid(),
-        }));
+        })));
 
         self.inner_add_before(&node);
 
@@ -649,7 +647,7 @@ impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NODE_KIND, fals
     fn correct_prev<'a, const FROM_DELETION: bool>( // FIXME: this method probably doesn't work correctly! - it probably leads to `self` being dropped for some reason in some cases
         self: &Arc<Aligned<A4, Self>>,              // FIXME: notable NO SwapArc isn't dropped itself tho
         node: NodePtr<T, NODE_KIND>/*&Arc<RawNode<T, NODE_KIND>>*//*NodePtr<T, NODE_KIND>*/,
-    ) -> PtrGuardOrPtr<'a, RawNode<T, NODE_KIND>> {
+    ) -> PtrGuardOrPtr<'a, AtomicDoublyLinkedListNode<T, NODE_KIND>> {
         println!("start correct prev!");
         let node = ManuallyDrop::new(unsafe { Arc::from_raw(node) });
         // let id = rand::random::<usize>();
@@ -657,7 +655,7 @@ impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NODE_KIND, fals
         // let initial = Arc::as_ptr(self); // = node
         let mut back_off_weight = 1;
         let mut prev = PtrGuardOrPtr::Ptr(Arc::as_ptr(self)); // = node
-        let mut last_link: Option<PtrGuardOrPtr<'_, RawNode<T, NODE_KIND>>/*NodePtr<T, NODE_KIND>*/> = None;
+        let mut last_link: Option<PtrGuardOrPtr<'_, AtomicDoublyLinkedListNode<T, NODE_KIND>>/*NodePtr<T, NODE_KIND>*/> = None;
         let mut i = 0;
         loop {
             /*if i >= 10 {
@@ -803,7 +801,7 @@ const DETACHED_MARKER: usize = 1 << 0/*62*/; // FIXME: can we replace this marke
 // #[derive(Debug)]
 struct Link<T, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
     // ptr: Aligned<A4, AtomicPtr<RawNode<T, NODE_KIND>>>,
-    ptr: Aligned<A4, Arc<SwapArcIntermediate<RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>/*Option<Arc<RawNode<T, NODE_KIND>>>*/, 2>>>,
+    ptr: Aligned<A4, Arc<SwapArcIntermediate<RawNode<T, NODE_KIND>, Option<Aligned<A4, Arc<RawNode<T, NODE_KIND>>>>/*Option<Arc<RawNode<T, NODE_KIND>>>*/, 2>>>,
 }
 
 impl<T, const NODE_KIND: NodeKind> Link<T, NODE_KIND> {
@@ -862,7 +860,7 @@ impl<T, const NODE_KIND: NodeKind> Link<T, NODE_KIND> {
     fn try_set_addr_full/*<const SET_DELETION_MARKER: bool>*/(
         &self,
         old: NodePtr<T, NODE_KIND>,
-        new: Arc<RawNode<T, NODE_KIND>>/*&SwapArcIntermediateGuard<'_, RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>, 2>,*/
+        new: Aligned<A4, Arc<RawNode<T, NODE_KIND>>>/*&SwapArcIntermediateGuard<'_, RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>, 2>,*/
     ) -> bool {
         /*unsafe { create_ref(new); } // FIXME: don't create references prematurely before even knowing whether the update will succeed or not
 
@@ -994,7 +992,7 @@ fn strongest_failure_ordering(order: Ordering) -> Ordering {
 // #[derive(Copy, Clone, Debug)]
 struct LinkContent<'a, T, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
     // ptr: NodePtr<T, NODE_KIND>,
-    ptr: SwapArcIntermediatePtrGuard<'a, RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>, 2>,
+    ptr: SwapArcIntermediatePtrGuard<'a, RawNode<T, NODE_KIND>, Option<Aligned<A4, Arc<RawNode<T, NODE_KIND>>>>, 2>,
 }
 
 impl<T, const NODE_KIND: NodeKind> LinkContent<'_, T, NODE_KIND> {
@@ -1077,7 +1075,7 @@ impl<T, const NODE_KIND: NodeKind> PartialEq for LinkContent<'_, T, NODE_KIND> {
 // #[derive(Copy, Clone, Debug)]
 struct FullLinkContent<T, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
     // ptr: NodePtr<T, NODE_KIND>,
-    ptr: SwapArcIntermediateFullPtrGuard<RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>, 2>,
+    ptr: SwapArcIntermediateFullPtrGuard<RawNode<T, NODE_KIND>, Option<Aligned<A4, Arc<RawNode<T, NODE_KIND>>>>, 2>,
 }
 
 impl<T, const NODE_KIND: NodeKind> FullLinkContent<T, NODE_KIND> {
@@ -1126,16 +1124,16 @@ impl Metadata {
 }
 
 enum PtrGuardOrPtr<'a, T> {
-    Guard(SwapArcIntermediatePtrGuard<'a, T, Option<Arc<T>>, 2>),
-    FullGuard(SwapArcIntermediateFullPtrGuard<T, Option<Arc<T>>, 2>),
-    Ptr(*const T),
+    Guard(SwapArcIntermediatePtrGuard<'a, Aligned<A4, T>, Option<Aligned<A4, Arc<Aligned<A4, T>>>>, 2>),
+    FullGuard(SwapArcIntermediateFullPtrGuard<Aligned<A4, T>, Option<Aligned<A4, Arc<Aligned<A4, T>>>>, 2>),
+    Ptr(*const Aligned<A4, T>),
 }
 
 impl<T> PtrGuardOrPtr<'_, T> {
 
     const META_MASK: usize = ((1 << 0) | (1 << 1));
 
-    fn as_ptr(&self) -> *const T {
+    fn as_ptr(&self) -> *const Aligned<A4, T> {
         match self {
             PtrGuardOrPtr::Guard(guard) => guard.as_raw(),
             PtrGuardOrPtr::Ptr(ptr) => *ptr,
@@ -1143,7 +1141,7 @@ impl<T> PtrGuardOrPtr<'_, T> {
         }
     }
 
-    fn as_ptr_no_meta(&self) -> *const T {
+    fn as_ptr_no_meta(&self) -> *const Aligned<A4, T> {
         ptr::from_exposed_addr(self.as_ptr().expose_addr() & !Self::META_MASK)
     }
 
@@ -1173,12 +1171,44 @@ fn leak_arc<'a, T: 'a>(val: Arc<T>) -> &'a Arc<T> {
     unsafe { ptr.as_ref() }.unwrap()
 }*/
 
+unsafe impl<T> RefCnt for Option<Aligned<A4, Arc<Aligned<A4, T>>>> {}
+
+impl<T> DataPtrConvert<Aligned<A4, T>> for Option<Aligned<A4, Arc<Aligned<A4, T>>>> {
+    const INVALID: *const Aligned<A4, T> = null();
+
+    fn from(ptr: *const Aligned<A4, T>) -> Self {
+        if !ptr.is_null() {
+            Some(Aligned(unsafe { Arc::from_raw(ptr) }))
+        } else {
+            None
+        }
+    }
+
+    fn into(self) -> *const Aligned<A4, T> {
+        match self {
+            None => null(),
+            Some(val) => Arc::as_ptr(&val),
+        }
+    }
+
+    fn as_ptr(&self) -> *const Aligned<A4, T> {
+        match self {
+            None => null(),
+            Some(val) => Arc::as_ptr(val),
+        }
+    }
+
+    fn increase_ref_cnt(&self) {
+        mem::forget(self.clone());
+    }
+}
+
 type NodePtr<T, const NODE_KIND: NodeKind, const REMOVED: bool = false> =
     *const RawNode<T, NODE_KIND, REMOVED>;
 type RawNode<T, const NODE_KIND: NodeKind, const REMOVED: bool = false> =
     Aligned<A4, AtomicDoublyLinkedListNode<T, NODE_KIND, REMOVED>>;
 pub type Node<T, const NODE_KIND: NodeKind, const REMOVED: bool = false> =
-    /*Pin<*/Arc<Aligned<A4, AtomicDoublyLinkedListNode<T, NODE_KIND, REMOVED>>>/*>*/;
+    /*Pin<*/Aligned<A4, Arc<Aligned<A4, AtomicDoublyLinkedListNode<T, NODE_KIND, REMOVED>>>>/*>*/;
 
 struct SizedBox<T> {
     // FIXME: NOTE: this thing could basically be replaced by Box::leak
@@ -1613,7 +1643,7 @@ impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> SwapArcI
     fn try_update_curr(&self) -> bool { // FIXME: this is very probably the cause of the issues! (29.10.22 | 20:25) - after testing it probably isn't!
         // println!("try update curr!");
         // false
-        /*match self.curr_ref_cnt.compare_exchange(0, Self::UPDATE, Ordering::SeqCst, Ordering::SeqCst) {
+        match self.curr_ref_cnt.compare_exchange(0, Self::UPDATE, Ordering::SeqCst, Ordering::SeqCst) {
             Ok(_) => {
                 println!("update curr!!");
                 // FIXME: can we somehow bypass intermediate if we have a new update upcoming - we probably can't because this would probably cause memory leaks and other funny things that we don't like
@@ -1643,12 +1673,11 @@ impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> SwapArcI
                 true
             }
             _ => false,
-        }*/
-        false
+        }
     }
 
     fn try_update_intermediate(&self) {
-        /*match self.intermediate_ref_cnt.compare_exchange(0, Self::UPDATE | Self::OTHER_UPDATE, Ordering::SeqCst, Ordering::SeqCst) {
+        match self.intermediate_ref_cnt.compare_exchange(0, Self::UPDATE | Self::OTHER_UPDATE, Ordering::SeqCst, Ordering::SeqCst) {
             Ok(_) => {
                 // take the update
                 let update = self.updated.swap(null_mut(), Ordering::SeqCst);
@@ -1681,11 +1710,11 @@ impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> SwapArcI
                 }
             }
             Err(_) => {}
-        }*/
+        }
     }
 
     pub fn update(&self, updated: D) {
-        // unsafe { self.update_raw(updated.into()); }
+        unsafe { self.update_raw(updated.into()); }
     }
 
     unsafe fn update_raw(&self, updated: *const T) {
@@ -1747,7 +1776,7 @@ impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> SwapArcI
     }
 
     unsafe fn try_compare_exchange<const IGNORE_META: bool>(&self, old: *const T, new: D/*&SwapArcIntermediateGuard<'_, T, D>*/) -> bool {
-        /*if !self.intermediate_ref_cnt.compare_exchange(0, Self::UPDATE | Self::OTHER_UPDATE, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+        if !self.intermediate_ref_cnt.compare_exchange(0, Self::UPDATE | Self::OTHER_UPDATE, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
             return false;
         }
         let intermediate = self.intermediate_ptr.load(Ordering::Acquire);
@@ -1785,7 +1814,7 @@ impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> SwapArcI
                 D::from(Self::strip_metadata(prev));
             }
             Err(_) => {}
-        }*/
+        }
         true
     }
 
@@ -1799,7 +1828,7 @@ impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> SwapArcI
     // FIXME: a better solution to this are strong - or (probably) even better, semi-strong loads
     // FIXME: i.e. loads which can outlive the SwapArc itself and doesn't hinder updates once created
     unsafe fn try_compare_exchange_with_meta(&self, old: *const T, new: *const T/*&SwapArcIntermediateGuard<'_, T, D>*/) -> bool {
-        /*println!("called cmp exchg!");
+        println!("called cmp exchg!");
         let tmp = self.intermediate_ref_cnt.compare_exchange(0, Self::UPDATE | Self::OTHER_UPDATE, Ordering::SeqCst, Ordering::SeqCst);
         if !tmp.is_ok() {
             match tmp {
@@ -1842,32 +1871,31 @@ impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> SwapArcI
                 D::from(Self::strip_metadata(prev));
             }
             Err(_) => {}
-        }*/
+        }
         true
     }
 
     pub fn update_metadata(&self, metadata: usize) {
-        /*loop {
+        loop {
             let curr = self.intermediate_ptr.load(Ordering::Acquire);
             if self.try_update_meta(curr, metadata) { // FIXME: should this be a weak compare_exchange?
                 break;
             }
-        }*/
+        }
     }
 
     /// `old` should contain the previous metadata.
     pub fn try_update_meta(&self, old: *const T, metadata: usize) -> bool {
         let prefix = metadata & Self::META_MASK;
-        // self.intermediate_ptr.compare_exchange(old.cast_mut(), ptr::from_exposed_addr_mut(old.expose_addr() | prefix), Ordering::SeqCst, Ordering::SeqCst).is_ok()
-        true
+        self.intermediate_ptr.compare_exchange(old.cast_mut(), ptr::from_exposed_addr_mut(old.expose_addr() | prefix), Ordering::SeqCst, Ordering::SeqCst).is_ok()
     }
 
     pub fn set_in_metadata(&self, active_bits: usize) {
-        // self.intermediate_ptr.fetch_or(active_bits, Ordering::Release);
+        self.intermediate_ptr.fetch_or(active_bits, Ordering::Release);
     }
 
     pub fn unset_in_metadata(&self, inactive_bits: usize) {
-        // self.intermediate_ptr.fetch_and(!inactive_bits, Ordering::Release);
+        self.intermediate_ptr.fetch_and(!inactive_bits, Ordering::Release);
     }
 
     pub fn load_metadata(&self) -> usize {

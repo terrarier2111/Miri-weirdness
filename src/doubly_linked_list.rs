@@ -487,7 +487,7 @@ impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NODE_KIND, fals
         }
         println!("added after!");
         // *cursor = node;
-        let _/*prev*/ = self.correct_prev::<false>(next.get_ptr()); // FIXME: this isn't even called until it panics, so this can't be the cause!
+        let _prev/*prev*/ = self.correct_prev::<false>(next.get_ptr()); // FIXME: this isn't even called until it panics, so this can't be the cause!
         // unsafe { release_ref_2(prev, next.get_ptr()); }
         /*drop(next);
         println!("right: curr refs {} | intermediate refs: {}", self.right.ptr.curr_ref_cnt.load(Ordering::SeqCst), self.right.ptr.intermediate_ref_cnt.load(Ordering::SeqCst));
@@ -1887,7 +1887,7 @@ impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> SwapArcI
     /// `old` should contain the previous metadata.
     pub fn try_update_meta(&self, old: *const T, metadata: usize) -> bool {
         let prefix = metadata & Self::META_MASK;
-        self.intermediate_ptr.compare_exchange(old.cast_mut(), ptr::from_exposed_addr_mut(old.expose_addr() | prefix), Ordering::SeqCst, Ordering::SeqCst).is_ok()
+        self.intermediate_ptr.compare_exchange(old.cast_mut(), old.map_addr(|x| x | prefix).cast_mut(), Ordering::SeqCst, Ordering::SeqCst).is_ok()
     }
 
     pub fn set_in_metadata(&self, active_bits: usize) {
@@ -1899,7 +1899,7 @@ impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> SwapArcI
     }
 
     pub fn load_metadata(&self) -> usize {
-        self.intermediate_ptr.load(Ordering::Acquire).expose_addr() & Self::META_MASK
+        Self::get_metadata(self.intermediate_ptr.load(Ordering::Acquire))
     }
 
     fn get_metadata(ptr: *const T) -> usize {
@@ -1907,11 +1907,11 @@ impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> SwapArcI
     }
 
     fn strip_metadata(ptr: *const T) -> *const T {
-        ptr::from_exposed_addr(ptr.expose_addr() & !Self::META_MASK)
+        ptr.map_addr(|x| x & !Self::META_MASK)
     }
 
     fn merge_ptr_and_metadata(ptr: *const T, metadata: usize) -> *const T {
-        ptr::from_exposed_addr(ptr/*Self::strip_metadata(ptr)*/.expose_addr() | metadata)
+        ptr/*Self::strip_metadata(ptr)*/.map_addr(|x| x | metadata)
     }
 
     const META_MASK: usize = {

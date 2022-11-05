@@ -15,4 +15,5 @@ rand = "0.8.5"
 aligned = "0.4.1"
 crossbeam-epoch = "0.9.11"
 crossbeam-utils = "0.8.12"
+thread_local = "1.1.4"
 # crossbeam

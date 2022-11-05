@@ -7,6 +7,7 @@
 #![feature(const_result_drop)]
 #![feature(const_option)]
 #![feature(strict_provenance_atomic_ptr)]
+#![feature(core_intrinsics)]
 
 mod linked_list;
 mod rustlings;

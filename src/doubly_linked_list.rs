@@ -12,6 +12,7 @@ use std::borrow::Borrow;
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
 use std::pin::Pin;
+use std::process::abort;
 
 // disable MIRI SB(stacked borrows) checks
 
@@ -149,7 +150,7 @@ impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedList<T, NODE_KIND> {
                     .get_ptr()
                     .cast::<RawNode<T, { NodeKind::Unbound }>>();
                 // increase the ref count because we want to return a reference to the node and thus we have to create a reference out of thin air
-                mem::forget(unsafe { Arc::from_raw(head) });
+                unsafe { create_ref(head); }
                 let head = Aligned(unsafe { Arc::from_raw(head) });
                 if let Some(val) = head.remove() {
                     println!("removed head!");
@@ -170,7 +171,7 @@ impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedList<T, NODE_KIND> {
                 let tail = self
                     .tail_node
                     .left
-                    .get()
+                    .get_full()
                     .get_ptr()
                     .cast::<RawNode<T, { NodeKind::Bound }>>();
                 let tail = ManuallyDrop::new(Aligned(unsafe { Arc::from_raw(tail) }));
@@ -184,7 +185,7 @@ impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedList<T, NODE_KIND> {
                 let tail = self
                     .tail_node
                     .left
-                    .get();
+                    .get_full();
                 let tail = tail
                     .get_ptr()
                     .cast::<RawNode<T, { NodeKind::Unbound }>>();
@@ -287,7 +288,7 @@ impl<T> AtomicDoublyLinkedListNode<T, { NodeKind::Bound }, false> {
                 }*/
                 return None;
             }
-            println!("pre set right!");
+            /*println!("pre set right!");
             println!("right: curr refs {} | intermediate refs: {}", self.right.ptr.curr_ref_cnt.load(Ordering::SeqCst), self.right.ptr.intermediate_ref_cnt.load(Ordering::SeqCst));
             let tmp = self.right.get();
             let tmp_right = ManuallyDrop::new(unsafe { Arc::from_raw(tmp.get_ptr()) });
@@ -295,7 +296,7 @@ impl<T> AtomicDoublyLinkedListNode<T, { NodeKind::Bound }, false> {
             println!("right arc refs: {}", Arc::strong_count(&tmp_right));
             drop(tmp);
             println!("curr right: {:?}", self.right.get().raw_ptr());
-            println!("next: {:?}", next.raw_ptr());
+            println!("next: {:?}", next.raw_ptr());*/
             if self.right.try_set_deletion_marker(next.raw_ptr()) {
                 println!("did set right!");
                 loop {
@@ -306,7 +307,7 @@ impl<T> AtomicDoublyLinkedListNode<T, { NodeKind::Bound }, false> {
                         break;
                     }
                 }
-                println!("pre head stuff!");
+                /*println!("pre head stuff!");
                 println!("right: curr refs {} | intermediate refs: {}", self.right.ptr.curr_ref_cnt.load(Ordering::SeqCst), self.right.ptr.intermediate_ref_cnt.load(Ordering::SeqCst));
                 let tmp = self.right.get();
                 let tmp_right = ManuallyDrop::new(unsafe { Arc::from_raw(tmp.get_ptr()) });
@@ -315,16 +316,17 @@ impl<T> AtomicDoublyLinkedListNode<T, { NodeKind::Bound }, false> {
                 drop(tmp);
                 let prev_tmp = ManuallyDrop::new(unsafe { Arc::from_raw(prev.get_ptr()) });
                 println!("left pre ptr: {:?}", self.left.get().raw_ptr());
-                println!("right pre ptr: {:?}", self.right.get().raw_ptr());
+                println!("right pre ptr: {:?}", self.right.get().raw_ptr());*/
+                let prev_tmp = ManuallyDrop::new(unsafe { Arc::from_raw(prev.get_ptr()) });
                 if let PtrGuardOrPtr::FullGuard(guard) = prev_tmp
                     .correct_prev::<true>(/*leak_arc(unsafe { Arc::from_raw(next.get_ptr()) })*/next.get_ptr()) { // FIXME: PROBABLY: next is already freed when it gets derefed again
                     prev = FullLinkContent {
                         ptr: guard, // FIXME: we get an unwrapped none panic in this line (in Bound mode) - that's probably because here we have a header node which we try to deref!
                     };
                 }
-                println!("post head stuff!");
+                /*println!("post head stuff!");
                 println!("left post ptr: {:?}", self.left.get().raw_ptr());
-                println!("right post ptr: {:?}", self.right.get().raw_ptr());
+                println!("right post ptr: {:?}", self.right.get().raw_ptr());*/
                 /*unsafe {
                     release_ref(prev.get_ptr());
                     release_ref(next.get_ptr());
@@ -445,7 +447,7 @@ impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NODE_KIND, fals
         // let node_ptr = Arc::as_ptr(node);
         let mut next;
         loop {
-            println!("in loop!");
+            println!("in loop: {} | {}", self.right.ptr.intermediate_ref_cnt.load(Ordering::SeqCst), self.right.ptr.curr_ref_cnt.load(Ordering::SeqCst));
             next = self.right.get_full()/*self.right.get()*/; // = tail // FIXME: MIRI flags this because apparently the SwapArc here gets dropped while performing the `get_full` operation.
             println!("got full!");
             unsafe {
@@ -601,7 +603,7 @@ impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NODE_KIND, fals
                 .get_deletion_marker();
             if marker
                 && unsafe { cursor.as_ref() }.unwrap().right.get().raw_ptr()
-                    != ptr::from_exposed_addr(next.raw_ptr().expose_addr() | DELETION_MARKER)
+                    != next.raw_ptr().map_addr(|x| x | DELETION_MARKER)
             {
                 unsafe { next.get_ptr().as_ref() }
                     .unwrap()
@@ -1005,9 +1007,7 @@ impl<T, const NODE_KIND: NodeKind> LinkContent<'_, T, NODE_KIND> {
     }
 
     fn get_ptr(&self) -> NodePtr<T, NODE_KIND> {
-        ptr::from_exposed_addr_mut(
-            self.raw_ptr().expose_addr() & (!(DELETION_MARKER | DETACHED_MARKER)),
-        )
+        self.raw_ptr().map_addr(|x| x & !(DELETION_MARKER | DETACHED_MARKER))
     }
 
     /*
@@ -1088,9 +1088,7 @@ impl<T, const NODE_KIND: NodeKind> FullLinkContent<T, NODE_KIND> {
     }
 
     fn get_ptr(&self) -> NodePtr<T, NODE_KIND> {
-        ptr::from_exposed_addr_mut(
-            self.raw_ptr().expose_addr() & (!(DELETION_MARKER | DETACHED_MARKER)),
-        )
+        self.raw_ptr().map_addr(|x| x & !(DELETION_MARKER | DETACHED_MARKER))
     }
 
     /*
@@ -1142,7 +1140,7 @@ impl<T> PtrGuardOrPtr<'_, T> {
     }
 
     fn as_ptr_no_meta(&self) -> *const Aligned<A4, T> {
-        ptr::from_exposed_addr(self.as_ptr().expose_addr() & !Self::META_MASK)
+        self.as_ptr().map_addr(|x| x & !Self::META_MASK)
     }
 
 }
@@ -1641,7 +1639,7 @@ impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> SwapArcI
     }
 
     fn try_update_curr(&self) -> bool { // FIXME: this is very probably the cause of the issues! (29.10.22 | 20:25) - after testing it probably isn't!
-        // println!("try update curr!");
+        println!("try update curr!");
         // false
         match self.curr_ref_cnt.compare_exchange(0, Self::UPDATE, Ordering::SeqCst, Ordering::SeqCst) {
             Ok(_) => {
@@ -1662,6 +1660,7 @@ impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> SwapArcI
                         self.intermediate_ref_cnt.fetch_and(!Self::OTHER_UPDATE, Ordering::SeqCst); // FIXME: are we sure this can't happen if there is UPDATE set for intermediate_ref?
                     } else {
                         println!("ENCOUNTERED WEIRD STATE!");
+                        abort();
                     }
                     // drop the `virtual reference` we hold to the Arc
                     D::from(Self::strip_metadata(prev));
@@ -1677,6 +1676,7 @@ impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> SwapArcI
     }
 
     fn try_update_intermediate(&self) {
+        println!("try update intermediate!");
         match self.intermediate_ref_cnt.compare_exchange(0, Self::UPDATE | Self::OTHER_UPDATE, Ordering::SeqCst, Ordering::SeqCst) {
             Ok(_) => {
                 // take the update
@@ -1694,6 +1694,7 @@ impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> SwapArcI
                             let prev = self.ptr.swap(update, Ordering::Release);
                             if Self::strip_metadata(prev) == Self::strip_metadata(update) {
                                 println!("ENCOUNTERED WEIRD STATE 2");
+                                abort();
                             }
                             // unset the update flag
                             self.curr_ref_cnt.fetch_and(!Self::UPDATE, Ordering::SeqCst);
@@ -1829,7 +1830,7 @@ impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> SwapArcI
     // FIXME: i.e. loads which can outlive the SwapArc itself and doesn't hinder updates once created
     unsafe fn try_compare_exchange_with_meta(&self, old: *const T, new: *const T/*&SwapArcIntermediateGuard<'_, T, D>*/) -> bool {
         println!("called cmp exchg!");
-        let tmp = self.intermediate_ref_cnt.compare_exchange(0, Self::UPDATE | Self::OTHER_UPDATE, Ordering::SeqCst, Ordering::SeqCst);
+        /*let tmp = self.intermediate_ref_cnt.compare_exchange(0, Self::UPDATE | Self::OTHER_UPDATE, Ordering::SeqCst, Ordering::SeqCst);
         if !tmp.is_ok() {
             match tmp {
                 Ok(_) => {}
@@ -1840,7 +1841,14 @@ impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> SwapArcI
                 }
             }
             return false;
+        }*/
+        let mut back_off_weight = 1;
+        while !self.intermediate_ref_cnt.compare_exchange(0, Self::UPDATE | Self::OTHER_UPDATE, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            // back-off
+            thread::sleep(Duration::from_micros(10 * back_off_weight));
+            back_off_weight += 1;
         }
+        println!("performing cmp exchg!!!");
         let intermediate = self.intermediate_ptr.load(Ordering::Acquire);
         if intermediate.cast_const() != old {
             self.intermediate_ref_cnt.fetch_and(!(Self::UPDATE | Self::OTHER_UPDATE), Ordering::SeqCst);

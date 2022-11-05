@@ -137,11 +137,12 @@ fn main() {
     // FIXME: the correct result gets computed
 
     // FIXME: everything works up to 20 pusher and 10 remover threads at least and up to 2000 iters per thread at least
-    for _ in 0..20/*5*//*1*/ {
+    // FIXME: (30.10.22 | normal execution finishes cleanly while miri gets stuck in an infinite loop at some point in time)
+    for _ in 0..20/*20*//*5*//*1*/ {
         let list = doubly_linked_list.clone();
         threads.push(thread::spawn(move || {
-            for x in 0..2000/*200*/ {
-                mem::forget(list.push_head(x));
+            for x in 0..2000/*25*//*50*//*200*//*0*//*200*/ {
+                list.push_head(x);
                 if x % 5 == 0 {
                     println!("completed push: {x}");
                 }
@@ -149,7 +150,6 @@ fn main() {
             }
         }));
     }
-    /*
     for _ in 0..20/*5*//*1*/ {
         // let send = send.clone();
         let list = doubly_linked_list.clone();
@@ -167,7 +167,7 @@ fn main() {
                 }
             }
         }));
-    }*/
+    }
     /*mem::forget(doubly_linked_list.push_head(0)); // this line alone in combination with Unbound leads to an infinite cycle - for some reason the program doesn't end but list empty still gets printed
     mem::forget(doubly_linked_list.push_head(1));
     mem::forget(doubly_linked_list.push_head(2));

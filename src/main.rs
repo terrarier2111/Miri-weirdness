@@ -8,6 +8,7 @@
 #![feature(const_option)]
 #![feature(strict_provenance_atomic_ptr)]
 #![feature(core_intrinsics)]
+#![feature(const_option_ext)]
 
 mod linked_list;
 mod rustlings;
@@ -22,7 +23,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 use rand::{Rng, thread_rng};
 use serde::{Deserialize, Serialize};
-use crate::doubly_linked_list::{AtomicDoublyLinkedList, NodeKind, SwapArcIntermediate};
+use crate::doubly_linked_list::{AtomicDoublyLinkedList, NodeKind, SwapArcIntermediateTLS};
 use crate::linked_list::LinkedList;
 use crate::rustlings::test_main;
 
@@ -139,7 +140,7 @@ fn main() {
 
     // FIXME: everything works up to 20 pusher and 10 remover threads at least and up to 2000 iters per thread at least
     // FIXME: (30.10.22 | normal execution finishes cleanly while miri gets stuck in an infinite loop at some point in time)
-    for _ in 0..20/*20*//*5*//*1*/ {
+    for _ in 0..10/*20*//*20*//*5*//*1*/ {
         let list = doubly_linked_list.clone();
         threads.push(thread::spawn(move || {
             for x in 0..2000/*25*//*50*//*200*//*0*//*200*/ {
@@ -151,7 +152,7 @@ fn main() {
             }
         }));
     }
-    for _ in 0..20/*5*//*1*/ {
+    for _ in 0..10/*20*//*5*//*1*/ {
         // let send = send.clone();
         let list = doubly_linked_list.clone();
         threads.push(thread::spawn(move || {
@@ -193,7 +194,7 @@ fn main() {
         println!("Aggressive push/pop testsuite passed!");
     }
     // println!("test: {:?}", test);
-    loop {}
+    // loop {}
 }
 
 /*

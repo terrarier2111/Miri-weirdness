@@ -29,14 +29,14 @@ use thread_local::ThreadLocal;
 // FIXME: add guard to nodes in Unbound mode to remove them once all of the references to them get dropped
 // FIXME: employ reference counting on the nodes in order for them to be dropped correctly
 #[derive(Clone)]
-pub struct AtomicDoublyLinkedList<T: Send + Sync, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
+pub struct AtomicDoublyLinkedList<T, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
     header_node: Aligned<A4, Arc<RawNode<T, NODE_KIND>>>,
     // in the header node itself, the left field points to the `header_node` field of the list itself, so we don't have to maintain a reference count
     tail_node: Aligned<A4, Arc<RawNode<T, NODE_KIND>>>,
     // in the tail node itself, the right field points to the `tail_node` field of the list itself, so we don't have to maintain a reference count
 }
 
-impl<T: Send + Sync, const NODE_KIND: NodeKind> AtomicDoublyLinkedList<T, NODE_KIND> {
+impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedList<T, NODE_KIND> {
     const ENDS_ORDERING: Ordering = Ordering::SeqCst;
 
     pub fn new() -> Arc<Self> {
@@ -228,7 +228,7 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> AtomicDoublyLinkedList<T, NODE_K
     // FIXME: add iter method!
 }
 
-impl<T: Send + Sync, const NODE_KIND: NodeKind> Drop for AtomicDoublyLinkedList<T, NODE_KIND> {
+impl<T, const NODE_KIND: NodeKind> Drop for AtomicDoublyLinkedList<T, NODE_KIND> {
     fn drop(&mut self) {
         // remove all nodes in the list, when the list gets dropped,
         // this makes sure that all the nodes' state is consistent
@@ -258,7 +258,7 @@ pub enum NodeKind {
 // in order to accomplish this we are always using this type in combination with Aligned<4, Self>
 // #[derive(Debug)]
 pub struct AtomicDoublyLinkedListNode<
-    T: Send + Sync,
+    T,
     const NODE_KIND: NodeKind = { NodeKind::Bound },
     const DELETED: bool = false,
 > {
@@ -270,7 +270,7 @@ pub struct AtomicDoublyLinkedListNode<
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-impl<T: Send + Sync> AtomicDoublyLinkedListNode<T, { NodeKind::Bound }, false> {
+impl<T> AtomicDoublyLinkedListNode<T, { NodeKind::Bound }, false> {
     pub fn remove(self: &Aligned<A4, Arc<Aligned<A4, Self>>>) -> Option<Node<T, { NodeKind::Bound }, true>> {
         // let this = Arc::as_ptr(self) as *const RawNode<T, { NodeKind::Bound }>;
         // let _tmp = self.left.get();
@@ -355,7 +355,7 @@ impl<T: Send + Sync> AtomicDoublyLinkedListNode<T, { NodeKind::Bound }, false> {
     }
 }
 
-impl<T: Send + Sync> AtomicDoublyLinkedListNode<T, { NodeKind::Unbound }, false> {
+impl<T> AtomicDoublyLinkedListNode<T, { NodeKind::Unbound }, false> {
     pub fn remove(self: Aligned<A4, Arc<Aligned<A4, Self>>>) -> Option<Node<T, { NodeKind::Bound }, true>> {
         /*fn inner_remove<T>(slf: &Arc<Aligned<A4, AtomicDoublyLinkedListNode<T, { NodeKind::Unbound }, false>>>) -> Option<()> {
             // let this = Arc::as_ptr(self) as *const RawNode<T, { NodeKind::Unbound }>;
@@ -409,7 +409,7 @@ impl<T: Send + Sync> AtomicDoublyLinkedListNode<T, { NodeKind::Unbound }, false>
     }
 }
 
-impl<T: Send + Sync, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NODE_KIND, false> {
+impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NODE_KIND, false> {
     pub fn add_after(self: &Arc<Aligned<A4, Self>>, val: T) -> Node<T, NODE_KIND> {
         let node = Aligned(Arc::new/*pin*/(Aligned(AtomicDoublyLinkedListNode {
             val: MaybeUninit::new(val),
@@ -450,7 +450,7 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NO
         // let node_ptr = Arc::as_ptr(node);
         let mut next;
         loop {
-            println!("in loop: {} | {}", self.right.ptr.intermediate_ref_cnt.load(Ordering::SeqCst), self.right.ptr.curr_ref_cnt.load(Ordering::SeqCst));
+            println!("in loop: {} | {}", self.right.ptr.intermediate_ref_cnt.load(Ordering::Acquire), self.right.ptr.curr_ref_cnt.load(Ordering::Acquire));
             next = self.right.get_full()/*self.right.get()*/; // = tail // FIXME: MIRI flags this because apparently the SwapArc here gets dropped while performing the `get_full` operation.
             println!("got full!");
             unsafe {
@@ -466,7 +466,7 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NO
 
                 // increase the ref count by 1
                 // create_ref(next.get_ptr());
-                node.right.set_unsafe/*::<false>*/(next.get_ptr());
+                node.right.set_unsafe/*::<false>*/(next.get_ptr()); // FIXME: for some reason the value which was here before may already have been freed, so this can lead to a use after free!
             }
 
             println!("set meta!");
@@ -511,12 +511,11 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NO
             right: Link::invalid(),
         })));
 
-        self.inner_add_before(&node);
-
         if NODE_KIND == NodeKind::Bound {
-            let ret = node.clone();
-            let _ = ManuallyDrop::new(ret); // leak a single reference
+            mem::forget(node.clone()); // leak a single reference
         }
+
+        self.inner_add_before(&node);
         node
     }
 
@@ -743,7 +742,7 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NO
     }
 }
 
-impl<T: Send + Sync, const NODE_KIND: NodeKind, const DELETED: bool>
+impl<T, const NODE_KIND: NodeKind, const DELETED: bool>
     AtomicDoublyLinkedListNode<T, NODE_KIND, DELETED>
 {
     /// checks whether the node is detached from the list or not
@@ -776,7 +775,7 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind, const DELETED: bool>
     }*/
 }
 
-impl<T: Send + Sync, const NODE_KIND: NodeKind, const DELETED: bool> Drop
+impl<T, const NODE_KIND: NodeKind, const DELETED: bool> Drop
     for AtomicDoublyLinkedListNode<T, NODE_KIND, DELETED>
 {
     fn drop(&mut self) {
@@ -804,12 +803,12 @@ const DELETION_MARKER: usize = 1 << 1/*63*/;
 const DETACHED_MARKER: usize = 1 << 0/*62*/; // FIXME: can we replace this marker with nulling pointers?
 
 // #[derive(Debug)]
-struct Link<T: Send + Sync, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
+struct Link<T, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
     // ptr: Aligned<A4, AtomicPtr<RawNode<T, NODE_KIND>>>,
     ptr: Aligned<A4, Arc<SwapArcIntermediateTLS<RawNode<T, NODE_KIND>, Option<Aligned<A4, Arc<RawNode<T, NODE_KIND>>>>/*Option<Arc<RawNode<T, NODE_KIND>>>*/, 2>>>,
 }
 
-impl<T: Send + Sync, const NODE_KIND: NodeKind> Link<T, NODE_KIND> {
+impl<T, const NODE_KIND: NodeKind> Link<T, NODE_KIND> {
     const CAS_ORDERING: Ordering = Ordering::SeqCst;
 
     fn get(&self) -> LinkContent<'_, T, NODE_KIND/*SwapArcIntermediatePtrGuard<'_, RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>*//*, LinkContent<T, NODE_KIND>*/>/*LinkContent<T, NODE_KIND>*//*SwapArcIntermediateGuard<'_, LinkContent<T, NODE_KIND>>*/ {
@@ -820,7 +819,7 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> Link<T, NODE_KIND> {
 
     fn get_full(&self) -> FullLinkContent<T, NODE_KIND> {
         FullLinkContent {
-            ptr: self.ptr.load_raw_full(),
+            ptr: unsafe { self.ptr.load_raw_full() },
         }
     }
 
@@ -996,12 +995,12 @@ fn strongest_failure_ordering(order: Ordering) -> Ordering {
 
 // FIXME: always pass this around wrapped inside a guard!
 // #[derive(Copy, Clone, Debug)]
-struct LinkContent<'a, T: Send + Sync, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
+struct LinkContent<'a, T, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
     // ptr: NodePtr<T, NODE_KIND>,
     ptr: SwapArcIntermediatePtrGuard<'a, RawNode<T, NODE_KIND>, Option<Aligned<A4, Arc<RawNode<T, NODE_KIND>>>>, 2>,
 }
 
-impl<T: Send + Sync, const NODE_KIND: NodeKind> LinkContent<'_, T, NODE_KIND> {
+impl<T, const NODE_KIND: NodeKind> LinkContent<'_, T, NODE_KIND> {
     fn get_deletion_marker(&self) -> bool {
         (self.raw_ptr().expose_addr() & DELETION_MARKER) != 0
     }
@@ -1069,7 +1068,7 @@ impl<'a, T, const NODE_KIND: NodeKind> Drop for LinkContent<'a, T, NODE_KIND> {
     }
 }*/
 
-impl<T: Send + Sync, const NODE_KIND: NodeKind> PartialEq for LinkContent<'_, T, NODE_KIND> {
+impl<T, const NODE_KIND: NodeKind> PartialEq for LinkContent<'_, T, NODE_KIND> {
     fn eq(&self, other: &Self) -> bool {
         self.raw_ptr().expose_addr() == other.raw_ptr().expose_addr()
     }
@@ -1077,12 +1076,12 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> PartialEq for LinkContent<'_, T,
 
 // FIXME: always pass this around wrapped inside a guard!
 // #[derive(Copy, Clone, Debug)]
-struct FullLinkContent<T: Send + Sync, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
+struct FullLinkContent<T, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
     // ptr: NodePtr<T, NODE_KIND>,
     ptr: SwapArcIntermediateFullPtrGuard<RawNode<T, NODE_KIND>, Option<Aligned<A4, Arc<RawNode<T, NODE_KIND>>>>, 2>,
 }
 
-impl<T: Send + Sync, const NODE_KIND: NodeKind> FullLinkContent<T, NODE_KIND> {
+impl<T, const NODE_KIND: NodeKind> FullLinkContent<T, NODE_KIND> {
     fn get_deletion_marker(&self) -> bool {
         (self.raw_ptr().expose_addr() & DELETION_MARKER) != 0
     }
@@ -1125,13 +1124,13 @@ impl Metadata {
 
 }
 
-enum PtrGuardOrPtr<'a, T: Send + Sync> {
+enum PtrGuardOrPtr<'a, T> {
     Guard(SwapArcIntermediatePtrGuard<'a, Aligned<A4, T>, Option<Aligned<A4, Arc<Aligned<A4, T>>>>, 2>),
     FullGuard(SwapArcIntermediateFullPtrGuard<Aligned<A4, T>, Option<Aligned<A4, Arc<Aligned<A4, T>>>>, 2>),
     Ptr(*const Aligned<A4, T>),
 }
 
-impl<T: Send + Sync> PtrGuardOrPtr<'_, T> {
+impl<T> PtrGuardOrPtr<'_, T> {
 
     const META_MASK: usize = ((1 << 0) | (1 << 1));
 
@@ -1149,18 +1148,18 @@ impl<T: Send + Sync> PtrGuardOrPtr<'_, T> {
 
 }
 
-unsafe fn release_ref<T: Send + Sync, const NODE_KIND: NodeKind>(node_ptr: NodePtr<T, NODE_KIND>) {
+unsafe fn release_ref<T, const NODE_KIND: NodeKind>(node_ptr: NodePtr<T, NODE_KIND>) {
     // decrement the reference count of the arc
     Arc::from_raw(node_ptr);
 }
 
-unsafe fn release_ref_2<T: Send + Sync, const NODE_KIND: NodeKind>(node_ptr: NodePtr<T, NODE_KIND>, node_ptr_2: NodePtr<T, NODE_KIND>) {
+unsafe fn release_ref_2<T, const NODE_KIND: NodeKind>(node_ptr: NodePtr<T, NODE_KIND>, node_ptr_2: NodePtr<T, NODE_KIND>) {
     // FIXME: is this the correct handling of release_ref with 2 params?
     // release_ref(node_ptr);
     // release_ref(node_ptr_2);
 }
 
-unsafe fn create_ref<T: Send + Sync, const NODE_KIND: NodeKind>(node_ptr: NodePtr<T, NODE_KIND>) {
+unsafe fn create_ref<T, const NODE_KIND: NodeKind>(node_ptr: NodePtr<T, NODE_KIND>) {
     let owned = Arc::from_raw(node_ptr);
     mem::forget(owned.clone());
     mem::forget(owned);
@@ -1173,9 +1172,9 @@ fn leak_arc<'a, T: 'a>(val: Arc<T>) -> &'a Arc<T> {
     unsafe { ptr.as_ref() }.unwrap()
 }*/
 
-unsafe impl<T: Send + Sync> RefCnt for Option<Aligned<A4, Arc<Aligned<A4, T>>>> {}
+unsafe impl<T> RefCnt for Option<Aligned<A4, Arc<Aligned<A4, T>>>> {}
 
-impl<T: Send + Sync> DataPtrConvert<Aligned<A4, T>> for Option<Aligned<A4, Arc<Aligned<A4, T>>>> {
+impl<T> DataPtrConvert<Aligned<A4, T>> for Option<Aligned<A4, Arc<Aligned<A4, T>>>> {
     const INVALID: *const Aligned<A4, T> = null();
 
     fn from(ptr: *const Aligned<A4, T>) -> Self {
@@ -1431,7 +1430,7 @@ const GLOBAL_UPDATE_FLAG: usize = 1 << 0;
 /// This variant of `SwapArc` has wait-free reads (although
 /// this is at the cost of additional atomic instructions
 /// (at least 1 additional load - this will never be more than 1 load if there are no updates happening).
-pub struct SwapArcIntermediateTLS<T: Send + Sync, D: DataPtrConvert<T> = Arc<T>, const METADATA_HEADER_BITS: u32 = 0> {
+pub struct SwapArcIntermediateTLS<T, D: DataPtrConvert<T> = Arc<T>, const METADATA_HEADER_BITS: u32 = 0> {
     // FIXME: support metadata - how can we do that?
     // FIXME: we could maybe do this by putting the metadata inside of the curr and intermediate atomic ptrs
     // FIXME: inside the SwapArc itself - the major issue we have is that with this approach we loose basically all the benefits
@@ -1448,7 +1447,7 @@ pub struct SwapArcIntermediateTLS<T: Send + Sync, D: DataPtrConvert<T> = Arc<T>,
     thread_local: ThreadLocal<LocalData<T, D, METADATA_HEADER_BITS>>,
 }
 
-impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> SwapArcIntermediateTLS<T, D, METADATA_PREFIX_BITS> {
+impl<T, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> SwapArcIntermediateTLS<T, D, METADATA_PREFIX_BITS> {
 
     const UPDATE: usize = 1 << (usize::BITS - 1);
     // const FORCE_UPDATE: usize = 1 << (usize::BITS - 2); // FIXME: do we actually need a separate flag? - we probably do
@@ -1519,7 +1518,7 @@ impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Swap
             };
         }
         if data.new.ref_cnt == 0 {
-            let ptr = if parent.parent.ptr.load(Ordering::Acquire) != unsafe { data.curr.val.assume_init_ref() }.as_ptr().cast_mut() {
+            let ptr = if Self::strip_metadata(parent.parent.ptr.load(Ordering::Acquire)) != data.curr.ptr.cast_mut() {
                 let curr = self.clone().load_internal();
                 // increase the strong reference count
                 mem::forget(curr.fake_ref.clone());
@@ -1543,18 +1542,18 @@ impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Swap
             };
         }
         if data.intermediate.ref_cnt == 0 {
-            let intermediate = parent.parent.intermediate_ptr.load(Ordering::Acquire);
+            let intermediate = Self::strip_metadata(parent.parent.intermediate_ptr.load(Ordering::Acquire));
             // check if there is a new intermediate value and that the intermediate value has been verified to be usable
-            let ptr = if intermediate.cast_const() != data.new.ptr {
+            let ptr = if intermediate != data.new.ptr {
                 let loaded = parent.parent.intermediate_ref_cnt.fetch_add(1, Ordering::SeqCst);
                 if loaded & Self::UPDATE == 0 {
-                    let loaded = parent.parent.intermediate_ptr.load(Ordering::Acquire);
+                    let loaded = Self::strip_metadata(parent.parent.intermediate_ptr.load(Ordering::Acquire));
                     data.intermediate = LocalCounted {
                         val: MaybeUninit::new(D::from(loaded)),
                         ptr: loaded,
                         ref_cnt: 1,
                     };
-                    loaded.cast_const()
+                    loaded
                 } else {
                     parent.parent.intermediate_ref_cnt.fetch_sub(1, Ordering::SeqCst);
                     data.new.ref_cnt += 1;
@@ -1570,6 +1569,7 @@ impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Swap
                 fake_ref,
             };
         } else {
+            println!("create intermediate ref!"); // FIXME: this and "delete intermediate ref" get spammed one after the other very fast
             data.intermediate.ref_cnt += 1;
             let fake_ref = ManuallyDrop::new(D::from(data.intermediate.ptr));
             return SwapArcIntermediateGuard {
@@ -1590,6 +1590,17 @@ impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Swap
         };
         SwapArcIntermediatePtrGuard {
             parent: guard.parent,
+            ptr: guard.fake_ref.as_ptr().map_addr(|x| x | curr_meta),
+        }
+    }
+
+    pub unsafe fn load_raw_full(self: &Arc<Self>) -> SwapArcIntermediateFullPtrGuard<T, D, METADATA_PREFIX_BITS> {
+        let guard = self.load();
+        let curr_meta = {
+            Self::get_metadata(self.intermediate_ptr.load(Ordering::Acquire)) // FIXME: is this okay - even, when `intermediate` is getting updated?
+        };
+        SwapArcIntermediateFullPtrGuard {
+            parent: guard.as_ref().clone(),
             ptr: guard.fake_ref.as_ptr().map_addr(|x| x | curr_meta),
         }
     }
@@ -1697,7 +1708,7 @@ impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Swap
                     let old = self.updated.swap(null_mut(), Ordering::SeqCst);
                     let metadata = Self::get_metadata(self.intermediate_ptr.load(Ordering::Acquire));
                     let new = Self::merge_ptr_and_metadata(new, metadata).cast_mut();
-                    self.intermediate_ptr.store(new, Ordering::Release);
+                    self.intermediate_ptr.store(new, Ordering::Release); // FIXME: this allows for metadata races - is this important? - we should at least document this properly!
                     // unset the update flag
                     self.intermediate_ref_cnt.fetch_and(!Self::UPDATE, Ordering::SeqCst);
                     if !old.is_null() {
@@ -1713,14 +1724,14 @@ impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Swap
                             // unset the `weak` update flag from the intermediate ref cnt
                             self.intermediate_ref_cnt.fetch_and(!Self::OTHER_UPDATE, Ordering::SeqCst);
                             // drop the `virtual reference` we hold to the Arc
-                            D::from(Self::strip_metadata(prev));
+                            D::from(Self::strip_metadata(prev)); // FIXME: this causes a use-after-free
                         }
                         Err(_) => {}
                     }
                     break;
                 }
                 Err(old) => {
-                    if old & Self::UPDATE != 0 { // FIXME: what about Self::UPDATE_OTHER?
+                    if old & Self::UPDATE != 0 {
                         // somebody else already updates the current ptr, so we wait until they finish their update
                         continue;
                     }
@@ -1808,10 +1819,13 @@ impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Swap
             // back-off
             thread::sleep(Duration::from_micros(10 * back_off_weight));
             back_off_weight += 1;
+            // println!("sleep: {back_off_weight}");
         }
+        println!("inside cmp exchg!");
         let intermediate = self.intermediate_ptr.load(Ordering::Acquire);
         if intermediate.cast_const() != old {
             self.intermediate_ref_cnt.fetch_and(!(Self::UPDATE | Self::OTHER_UPDATE), Ordering::SeqCst);
+            println!("cmp exchg failed!");
             return false;
         }
         // clear out old updates to make sure our update won't be overwritten by them in the future
@@ -1828,7 +1842,7 @@ impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Swap
         }
         match self.curr_ref_cnt.compare_exchange(0, Self::UPDATE, Ordering::SeqCst, Ordering::Relaxed) {
             Ok(_) => {
-                let prev = self.ptr.swap(new.cast_mut(), Ordering::Release);
+                let prev = self.ptr.swap(new.cast_mut(), Ordering::SeqCst);
                 // unset the update flag
                 self.curr_ref_cnt.fetch_and(!Self::UPDATE, Ordering::SeqCst);
                 // unset the `weak` update flag from the intermediate ref cnt
@@ -1838,6 +1852,7 @@ impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Swap
             }
             Err(_) => {}
         }
+        println!("successfully finished cmp exchg!");
         true
     }
 
@@ -1911,7 +1926,7 @@ impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Swap
 
 }
 
-impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Drop for SwapArcIntermediateTLS<T, D, METADATA_PREFIX_BITS> {
+impl<T, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Drop for SwapArcIntermediateTLS<T, D, METADATA_PREFIX_BITS> {
     fn drop(&mut self) {
         // FIXME: how should we handle intermediate inside drop?
         let updated = *self.updated.get_mut();
@@ -1929,12 +1944,12 @@ impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Drop
     }
 }
 
-pub struct SwapArcIntermediatePtrGuard<'a, T: Send + Sync, D: DataPtrConvert<T> = Arc<T>, const METADATA_PREFIX_BITS: u32 = 0> {
+pub struct SwapArcIntermediatePtrGuard<'a, T, D: DataPtrConvert<T> = Arc<T>, const METADATA_PREFIX_BITS: u32 = 0> {
     parent: &'a LocalData<T, D, METADATA_PREFIX_BITS>,
     ptr: *const T,
 }
 
-impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> SwapArcIntermediatePtrGuard<'_, T, D, METADATA_PREFIX_BITS> {
+impl<T, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> SwapArcIntermediatePtrGuard<'_, T, D, METADATA_PREFIX_BITS> {
 
     #[inline]
     pub fn as_raw(&self) -> *const T {
@@ -1943,25 +1958,24 @@ impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Swap
 
 }
 
-impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Clone for SwapArcIntermediatePtrGuard<'_, T, D, METADATA_PREFIX_BITS> {
+impl<T, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Clone for SwapArcIntermediatePtrGuard<'_, T, D, METADATA_PREFIX_BITS> {
     fn clone(&self) -> Self {
         unsafe { self.parent.parent.load_raw() }
     }
 }
 
-impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Drop for SwapArcIntermediatePtrGuard<'_, T, D, METADATA_PREFIX_BITS> {
+impl<T, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Drop for SwapArcIntermediatePtrGuard<'_, T, D, METADATA_PREFIX_BITS> {
     fn drop(&mut self) {
         // SAFETY: This is safe because we know that we are the only thread that
         // is able to access the thread local data at this time and said data has to be initialized
         // and we also know, that the pointer has to be non-null
         let data = unsafe { self.parent.inner.get().as_mut().unwrap_unchecked() };
+        let ptr = SwapArcIntermediateTLS::<T, D, METADATA_PREFIX_BITS>::strip_metadata(self.ptr);
         // release the reference we hold
-        if self.ptr == unsafe { data.curr.val.assume_init_ref() }.as_ptr() {
+        if ptr == unsafe { data.curr.val.assume_init_ref() }.as_ptr() {
             data.curr.ref_cnt -= 1;
             if data.curr.ref_cnt == 0 {
                 if !data.new.ptr.is_null() {
-                    // decrease the ref count of the old value
-                    unsafe { data.curr.val.assume_init_drop() };
                     data.curr = mem::take(&mut data.new);
                     if !data.intermediate.ptr.is_null() {
                         data.new = mem::take(&mut data.intermediate).make_drop();
@@ -1971,7 +1985,7 @@ impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Drop
                     }
                 }
             }
-        } else if self.ptr == data.new.ptr {
+        } else if ptr == data.new.ptr {
             data.new.ref_cnt -= 1;
             if data.new.ref_cnt == 0 {
                 if !data.intermediate.ptr.is_null() {
@@ -1981,29 +1995,31 @@ impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Drop
                     self.parent.parent.intermediate_ref_cnt.fetch_sub(1, Ordering::SeqCst);
                 }
             }
-        } else {
+        } else if data.intermediate.ptr == ptr {
+            println!("delete intermediate ref!");
             data.intermediate.ref_cnt -= 1;
             if data.intermediate.ref_cnt == 0 {
                 self.parent.parent.intermediate_ref_cnt.fetch_sub(1, Ordering::SeqCst);
             }
+        } else {
+            panic!("1: found foreign ptr inside guard {:?}", ptr);
         }
     }
 }
 
-impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Debug for SwapArcIntermediatePtrGuard<'_, T, D, METADATA_PREFIX_BITS> {
+impl<T, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Debug for SwapArcIntermediatePtrGuard<'_, T, D, METADATA_PREFIX_BITS> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let tmp = format!("{:?}", self.ptr);
         f.write_str(tmp.as_str())
     }
 }
 
-#[derive(Clone)]
-pub struct SwapArcIntermediateFullPtrGuard<T: Send + Sync, D: DataPtrConvert<T> = Arc<T>, const METADATA_PREFIX_BITS: u32 = 0> {
+pub struct SwapArcIntermediateFullPtrGuard<T, D: DataPtrConvert<T> = Arc<T>, const METADATA_PREFIX_BITS: u32 = 0> {
     parent: D,
     ptr: *const T,
 }
 
-impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> SwapArcIntermediateFullPtrGuard<T, D, METADATA_PREFIX_BITS> {
+impl<T, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> SwapArcIntermediateFullPtrGuard<T, D, METADATA_PREFIX_BITS> {
 
     #[inline]
     pub fn as_raw(&self) -> *const T {
@@ -2012,7 +2028,16 @@ impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Swap
 
 }
 
-impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Debug for SwapArcIntermediateFullPtrGuard<T, D, METADATA_PREFIX_BITS> {
+impl<T, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Clone for SwapArcIntermediateFullPtrGuard<T, D, METADATA_PREFIX_BITS> {
+    fn clone(&self) -> Self {
+        Self {
+            parent: self.parent.clone(),
+            ptr: self.ptr,
+        }
+    }
+}
+
+impl<T, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Debug for SwapArcIntermediateFullPtrGuard<T, D, METADATA_PREFIX_BITS> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let tmp = format!("{:?}", self.ptr);
         f.write_str(tmp.as_str())
@@ -2020,24 +2045,22 @@ impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Debu
 }
 
 
-pub struct SwapArcIntermediateGuard<'a, T: Send + Sync, D: DataPtrConvert<T> = Arc<T>, const METADATA_PREFIX_BITS: u32 = 0> {
+pub struct SwapArcIntermediateGuard<'a, T, D: DataPtrConvert<T> = Arc<T>, const METADATA_PREFIX_BITS: u32 = 0> {
     parent: &'a LocalData<T, D, METADATA_PREFIX_BITS>,
     fake_ref: ManuallyDrop<D>,
 }
 
-impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Drop for SwapArcIntermediateGuard<'_, T, D, METADATA_PREFIX_BITS> {
+impl<T, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Drop for SwapArcIntermediateGuard<'_, T, D, METADATA_PREFIX_BITS> {
     fn drop(&mut self) {
         // SAFETY: This is safe because we know that we are the only thread that
         // is able to access the thread local data at this time and said data has to be initialized
         // and we also know, that the pointer has to be non-null
         let data = unsafe { self.parent.inner.get().as_mut().unwrap_unchecked() };
         // release the reference we hold
-        if self.fake_ref.as_ptr() == unsafe { data.curr.val.assume_init_ref() }.as_ptr() {
+        if self.fake_ref.as_ptr() == data.curr.ptr {
             data.curr.ref_cnt -= 1;
             if data.curr.ref_cnt == 0 {
                 if !data.new.ptr.is_null() {
-                    // decrease the ref count of the old value
-                    unsafe { data.curr.val.assume_init_drop() };
                     data.curr = mem::take(&mut data.new);
                     if !data.intermediate.ptr.is_null() {
                         data.new = mem::take(&mut data.intermediate).make_drop();
@@ -2057,16 +2080,19 @@ impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Drop
                     self.parent.parent.intermediate_ref_cnt.fetch_sub(1, Ordering::SeqCst);
                 }
             }
-        } else {
+        }  else if data.intermediate.ptr == self.fake_ref.as_ptr() {
+            println!("delete intermediate ref!");
             data.intermediate.ref_cnt -= 1;
             if data.intermediate.ref_cnt == 0 {
                 self.parent.parent.intermediate_ref_cnt.fetch_sub(1, Ordering::SeqCst);
             }
+        } else {
+            panic!("2: found foreign ptr inside guard {:?}", self.fake_ref.as_ptr());
         }
     }
 }
 
-impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Deref for SwapArcIntermediateGuard<'_, T, D, METADATA_PREFIX_BITS> {
+impl<T, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Deref for SwapArcIntermediateGuard<'_, T, D, METADATA_PREFIX_BITS> {
     type Target = D;
 
     #[inline]
@@ -2075,40 +2101,40 @@ impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Dere
     }
 }
 
-impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Borrow<D> for SwapArcIntermediateGuard<'_, T, D, METADATA_PREFIX_BITS> {
+impl<T, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Borrow<D> for SwapArcIntermediateGuard<'_, T, D, METADATA_PREFIX_BITS> {
     #[inline]
     fn borrow(&self) -> &D {
         self.fake_ref.deref()
     }
 }
 
-impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> AsRef<D> for SwapArcIntermediateGuard<'_, T, D, METADATA_PREFIX_BITS> {
+impl<T, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> AsRef<D> for SwapArcIntermediateGuard<'_, T, D, METADATA_PREFIX_BITS> {
     #[inline]
     fn as_ref(&self) -> &D {
         self.fake_ref.deref()
     }
 }
 
-impl<T: Send + Sync, D: DataPtrConvert<T> + Display, const METADATA_PREFIX_BITS: u32> Display for SwapArcIntermediateGuard<'_, T, D, METADATA_PREFIX_BITS> {
+impl<T, D: DataPtrConvert<T> + Display, const METADATA_PREFIX_BITS: u32> Display for SwapArcIntermediateGuard<'_, T, D, METADATA_PREFIX_BITS> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         D::fmt(self.as_ref(), f)
     }
 }
 
-impl<T: Send + Sync, D: DataPtrConvert<T> + Debug, const METADATA_PREFIX_BITS: u32> Debug for SwapArcIntermediateGuard<'_, T, D, METADATA_PREFIX_BITS> {
+impl<T, D: DataPtrConvert<T> + Debug, const METADATA_PREFIX_BITS: u32> Debug for SwapArcIntermediateGuard<'_, T, D, METADATA_PREFIX_BITS> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         D::fmt(self.as_ref(), f)
     }
 }
 
 
-struct SwapArcIntermediateInternalGuard<T: Send + Sync, D: DataPtrConvert<T> = Arc<T>, const METADATA_PREFIX_BITS: u32 = 0> {
+struct SwapArcIntermediateInternalGuard<T, D: DataPtrConvert<T> = Arc<T>, const METADATA_PREFIX_BITS: u32 = 0> {
     parent: Arc<SwapArcIntermediateTLS<T, D, METADATA_PREFIX_BITS>>,
     fake_ref: ManuallyDrop<D>,
     ref_src: RefSource,
 }
 
-impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Drop for SwapArcIntermediateInternalGuard<T, D, METADATA_PREFIX_BITS> {
+impl<T, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Drop for SwapArcIntermediateInternalGuard<T, D, METADATA_PREFIX_BITS> {
     fn drop(&mut self) {
         // release the reference we hold
         match self.ref_src {
@@ -2130,13 +2156,13 @@ impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Drop
     }
 }
 
-impl<T: Send + Sync, D: DataPtrConvert<T> + Display, const METADATA_PREFIX_BITS: u32> Display for SwapArcIntermediateInternalGuard<T, D, METADATA_PREFIX_BITS> {
+impl<T, D: DataPtrConvert<T> + Display, const METADATA_PREFIX_BITS: u32> Display for SwapArcIntermediateInternalGuard<T, D, METADATA_PREFIX_BITS> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         D::fmt(self.fake_ref.deref(), f)
     }
 }
 
-impl<T: Send + Sync, D: DataPtrConvert<T> + Debug, const METADATA_PREFIX_BITS: u32> Debug for SwapArcIntermediateInternalGuard<T, D, METADATA_PREFIX_BITS> {
+impl<T, D: DataPtrConvert<T> + Debug, const METADATA_PREFIX_BITS: u32> Debug for SwapArcIntermediateInternalGuard<T, D, METADATA_PREFIX_BITS> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         D::fmt(self.fake_ref.deref(), f)
     }
@@ -2147,35 +2173,35 @@ enum RefSource {
     Intermediate,
 }
 
-struct LocalData<T: Send + Sync, D: DataPtrConvert<T> = Arc<T>, const METADATA_PREFIX_BITS: u32 = 0> {
+struct LocalData<T, D: DataPtrConvert<T> = Arc<T>, const METADATA_PREFIX_BITS: u32 = 0> {
     parent: ManuallyDrop<Arc<SwapArcIntermediateTLS<T, D, METADATA_PREFIX_BITS>>>, // this acts as a reference with hidden lifetime that only we know is safe because
     // `parent` won't be used in the drop impl and `LocalData` can only be accessed
     // through `parent`
-    inner: UnsafeCell<LocalDataInner<T, D, METADATA_PREFIX_BITS>>,
+    inner: UnsafeCell<LocalDataInner<T, D>>,
 }
 
 // FIXME: add safety comment (the gist is that this will only ever be used when `parent` is dropped)
-unsafe impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Sync for LocalData<T, D, METADATA_PREFIX_BITS> {}
+unsafe impl<T, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Sync for LocalData<T, D, METADATA_PREFIX_BITS> {}
 
-impl<T: Send + Sync, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Drop for LocalData<T, D, METADATA_PREFIX_BITS> {
+impl<T, D: DataPtrConvert<T>, const METADATA_PREFIX_BITS: u32> Drop for LocalData<T, D, METADATA_PREFIX_BITS> {
     fn drop(&mut self) {
         println!("drop super");
     }
 }
 
-struct LocalDataInner<T: Send + Sync, D: DataPtrConvert<T> = Arc<T>, const METADATA_PREFIX_BITS: u32 = 0> {
+struct LocalDataInner<T, D: DataPtrConvert<T> = Arc<T>> {
     intermediate: LocalCounted<T, D>,
     new: LocalCounted<T, D, true>,
     curr: LocalCounted<T, D, true>,
 }
 
-struct LocalCounted<T: Send + Sync, D: DataPtrConvert<T> = Arc<T>, const DROP: bool = false> {
+struct LocalCounted<T, D: DataPtrConvert<T> = Arc<T>, const DROP: bool = false> {
     val: MaybeUninit<D>,
     ptr: *const T,
     ref_cnt: usize,
 }
 
-impl<T: Send + Sync, D: DataPtrConvert<T>> LocalCounted<T, D, false> {
+impl<T, D: DataPtrConvert<T>> LocalCounted<T, D, false> {
 
     fn make_drop(mut self) -> LocalCounted<T, D, true> {
         LocalCounted {
@@ -2187,7 +2213,7 @@ impl<T: Send + Sync, D: DataPtrConvert<T>> LocalCounted<T, D, false> {
 
 }
 
-impl<T: Send + Sync, D: DataPtrConvert<T>, const DROP: bool> Default for LocalCounted<T, D, DROP> {
+impl<T, D: DataPtrConvert<T>, const DROP: bool> Default for LocalCounted<T, D, DROP> {
     fn default() -> Self {
         Self {
             val: MaybeUninit::uninit(),
@@ -2199,14 +2225,14 @@ impl<T: Send + Sync, D: DataPtrConvert<T>, const DROP: bool> Default for LocalCo
 
 // FIXME: is `Send` safe to implement even for `DROP = true`? - it probably is!
 // FIXME: add safety comment (the gist is that this will only ever be used when `parent` is dropped)
-unsafe impl<T: Send + Sync, D: DataPtrConvert<T>, const DROP: bool> Send for LocalCounted<T, D, DROP> {}
+unsafe impl<T, D: DataPtrConvert<T>, const DROP: bool> Send for LocalCounted<T, D, DROP> {}
 
-impl<T: Send + Sync, D: DataPtrConvert<T>, const DROP: bool> Drop for LocalCounted<T, D, DROP> {
+impl<T, D: DataPtrConvert<T>, const DROP: bool> Drop for LocalCounted<T, D, DROP> {
     #[inline]
     fn drop(&mut self) {
-        println!("try dropping!");
+        // println!("try dropping!");
         if DROP {
-            println!("dropping!");
+            // println!("dropping!");
             if !self.ptr.is_null() {
                 // SAFETY: the person defining this struct has to make sure that
                 // choosing `DROP` is correct.
@@ -2218,7 +2244,7 @@ impl<T: Send + Sync, D: DataPtrConvert<T>, const DROP: bool> Drop for LocalCount
 
 /// SAFETY: Types implementing this trait are expected to perform
 /// reference counting through cloning/dropping internally.
-pub unsafe trait RefCnt: Send + Sync + Sync + Clone {}
+pub unsafe trait RefCnt: /*Send + Sync + */Clone {}
 
 pub trait DataPtrConvert<T>: RefCnt + Sized {
 
@@ -2244,9 +2270,9 @@ pub trait DataPtrConvert<T>: RefCnt + Sized {
 
 }
 
-unsafe impl<T: Send + Sync> RefCnt for Arc<T> {}
+unsafe impl<T> RefCnt for Arc<T> {}
 
-impl<T: Send + Sync> DataPtrConvert<T> for Arc<T> {
+impl<T> DataPtrConvert<T> for Arc<T> {
     const INVALID: *const T = null();
 
     fn from(ptr: *const T) -> Self {
@@ -2269,9 +2295,9 @@ impl<T: Send + Sync> DataPtrConvert<T> for Arc<T> {
     }
 }
 
-unsafe impl<T: Send + Sync> RefCnt for Option<Arc<T>> {}
+unsafe impl<T> RefCnt for Option<Arc<T>> {}
 
-impl<T: Send + Sync> DataPtrConvert<T> for Option<Arc<T>> {
+impl<T> DataPtrConvert<T> for Option<Arc<T>> {
     const INVALID: *const T = null();
 
     fn from(ptr: *const T) -> Self {
@@ -2305,4 +2331,3 @@ impl<T: Send + Sync> DataPtrConvert<T> for Option<Arc<T>> {
         mem::forget(self.clone());
     }
 }
-

@@ -13,6 +13,7 @@
 mod linked_list;
 mod rustlings;
 mod doubly_linked_list;
+mod swap_arc;
 
 use std::arch::asm;
 use std::cmp::Ordering;
@@ -23,7 +24,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 use rand::{Rng, thread_rng};
 use serde::{Deserialize, Serialize};
-use crate::doubly_linked_list::{AtomicDoublyLinkedList, NodeKind, SwapArcIntermediateTLS};
+use crate::doubly_linked_list::{AtomicDoublyLinkedList, NodeKind};
 use crate::linked_list::LinkedList;
 use crate::rustlings::test_main;
 
@@ -129,7 +130,7 @@ fn main() {
 
     // loop {}
     let doubly_linked_list: Arc<AtomicDoublyLinkedList<i32, { NodeKind::Bound }>> = AtomicDoublyLinkedList::new();
-    let mut threads = vec![];
+    /*let mut threads = vec![];
     // let (mut send, mut recv) = mpsc::channel();
     // FIXME: with only adder threads, a normal execution finishes, but a miri execution (at least seems to) loop infinitely - but this could also just be because of worse
     // FIXME: throughput on miri's side
@@ -143,7 +144,7 @@ fn main() {
     for _ in 0..10/*20*//*20*//*5*//*1*/ {
         let list = doubly_linked_list.clone();
         threads.push(thread::spawn(move || {
-            for x in 0..2000/*25*//*50*//*200*//*0*//*200*/ {
+            for x in 0..50/*2000*//*25*//*50*//*200*//*0*//*200*/ {
                 list.push_head(x);
                 if x % 5 == 0 {
                     println!("completed push: {x}");
@@ -152,7 +153,8 @@ fn main() {
             }
         }));
     }
-    for _ in 0..10/*20*//*5*//*1*/ {
+    thread::sleep(Duration::from_secs(1));
+    /*for _ in 0..10/*20*//*5*//*1*/ {
         // let send = send.clone();
         let list = doubly_linked_list.clone();
         threads.push(thread::spawn(move || {
@@ -169,7 +171,7 @@ fn main() {
                 }
             }
         }));
-    }
+    }*/
     /*mem::forget(doubly_linked_list.push_head(0)); // this line alone in combination with Unbound leads to an infinite cycle - for some reason the program doesn't end but list empty still gets printed
     mem::forget(doubly_linked_list.push_head(1));
     mem::forget(doubly_linked_list.push_head(2));
@@ -184,11 +186,12 @@ fn main() {
    //  threads.into_iter().for_each(|thread| thread.join().unwrap());
     */
     // threads.into_iter().for_each(|thread| thread.join().unwrap());
-    threads.into_iter().for_each(|thread| thread.join().unwrap());
+    threads.into_iter().for_each(|thread| thread.join().unwrap());*/
     /*doubly_linked_list.remove_head();
     doubly_linked_list.remove_head();
     doubly_linked_list.remove_head();
     doubly_linked_list.remove_head();*/
+    doubly_linked_list.push_head(52);
     println!("list empty: {}", doubly_linked_list.is_empty());
     if doubly_linked_list.is_empty() {
         println!("Aggressive push/pop testsuite passed!");

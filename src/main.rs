@@ -14,6 +14,8 @@ mod linked_list;
 mod rustlings;
 mod doubly_linked_list;
 mod swap_arc;
+mod fair_mutex;
+mod unfair_mutex;
 
 use std::arch::asm;
 use std::cmp::Ordering;
@@ -21,12 +23,15 @@ use std::{io, mem, thread};
 use std::io::{Error, ErrorKind, Read, Write};
 use std::mem::{ManuallyDrop, transmute};
 use std::sync::{Arc, mpsc};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use parking_lot::Mutex;
 use rand::{Rng, thread_rng};
 use serde::{Deserialize, Serialize};
 use crate::doubly_linked_list::{AtomicDoublyLinkedList, NodeKind};
+use crate::fair_mutex::FairMutex;
 use crate::linked_list::LinkedList;
 use crate::rustlings::test_main;
+use crate::unfair_mutex::UnfairMutex;
 
 fn main() {
     /*let stack_pointer: u64;
@@ -129,6 +134,7 @@ fn main() {
     threads.into_iter().for_each(|thread| thread.join().unwrap());*/
 
     // loop {}
+    /*
     let doubly_linked_list: Arc<AtomicDoublyLinkedList<i32, { NodeKind::Bound }>> = AtomicDoublyLinkedList::new();
     /*let mut threads = vec![];
     // let (mut send, mut recv) = mpsc::channel();
@@ -196,8 +202,33 @@ fn main() {
     if doubly_linked_list.is_empty() {
         println!("Aggressive push/pop testsuite passed!");
     }
+    */
     // println!("test: {:?}", test);
     // loop {}
+
+    let mutex = Arc::new(/*FairMutex*//*parking_lot::*/FairMutex/*FairMutex*/::new(20));
+    let mut threads = vec![];
+    let start = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    for _ in 0..8/*20*//*5*//*1*/ {
+        let tmp = mutex.clone();
+        threads.push(thread::spawn(move || {
+            for _ in 0..20000/*200*/ {
+                let mut l1 = tmp.lock();
+                println!("val: {}", &*l1);
+                *l1 = rand::random();
+                // thread::sleep(Duration::from_millis(1000));
+            }
+        }));
+    }
+    threads.into_iter().for_each(|thread| thread.join().unwrap());
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    println!("test took: {}ms", time - start);
 }
 
 /*

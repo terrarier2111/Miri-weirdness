@@ -16,24 +16,32 @@ mod doubly_linked_list;
 mod swap_arc;
 mod fair_mutex;
 mod unfair_mutex;
+mod fair_mutex_minimal;
+mod unfair_mutex_minimal;
 
 use std::arch::asm;
 use std::cmp::Ordering;
 use std::{io, mem, thread};
+use std::hint::black_box;
 use std::io::{Error, ErrorKind, Read, Write};
 use std::mem::{ManuallyDrop, transmute};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, atomic, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use parking_lot::Mutex;
 use rand::{Rng, thread_rng};
 use serde::{Deserialize, Serialize};
 use crate::doubly_linked_list::{AtomicDoublyLinkedList, NodeKind};
 use crate::fair_mutex::FairMutex;
+use crate::fair_mutex_minimal::TICKET_MASK;
 use crate::linked_list::LinkedList;
 use crate::rustlings::test_main;
 use crate::unfair_mutex::UnfairMutex;
 
 fn main() {
+    /*let mut fake_mutex = fair_mutex_minimal::FairMutex::new(30);
+    let guard = black_box(fair_mutex_minimal::lock_cool_name(&fake_mutex));
+    black_box(fair_mutex_minimal::drop_cool_name(&guard));
+    black_box(fair_mutex_minimal::lock_slow_cool_name(&fake_mutex, fake_mutex.state.load(atomic::Ordering::Acquire) & TICKET_MASK));*/
     /*let stack_pointer: u64;
     let stack_base_pointer: u64;
     let stack_pointer_2: u64;
@@ -206,19 +214,21 @@ fn main() {
     // println!("test: {:?}", test);
     // loop {}
 
-    let mutex = Arc::new(/*FairMutex*//*parking_lot::*/FairMutex/*FairMutex*/::new(20));
+    let mutex = Arc::new(/*parking_lot::Mutex*//*FairMutex*//*parking_lot::*/fair_mutex_minimal::FairMutex/*unfair_mutex_minimal::UnfairMutex*//*FairMutex*/::new(20));
     let mut threads = vec![];
     let start = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis();
-    for _ in 0..8/*20*//*5*//*1*/ {
+    for _ in 0..1/*2*//*2*//*8*//*20*//*5*//*1*/ {
         let tmp = mutex.clone();
         threads.push(thread::spawn(move || {
-            for _ in 0..20000/*200*/ {
+            let rand = rand::random();
+            for _ in 0..200000000/*200*/ {
                 let mut l1 = tmp.lock();
-                println!("val: {}", &*l1);
-                *l1 = rand::random();
+                // println!("val: {}", &*l1);
+                black_box(&*l1);
+                *l1 = rand;
                 // thread::sleep(Duration::from_millis(1000));
             }
         }));

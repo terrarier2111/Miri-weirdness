@@ -1,28 +1,30 @@
 use std::cell::UnsafeCell;
 use std::hint::spin_loop;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU8, AtomicUsize, fence, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU16, AtomicU32, AtomicU8, AtomicUsize, fence, Ordering};
 use std::thread::yield_now;
 use cfg_if::cfg_if;
 use parking_lot_core::{DEFAULT_PARK_TOKEN, DEFAULT_UNPARK_TOKEN, FilterOp, ParkResult, ParkToken, SpinWait, UnparkResult, UnparkToken};
 
 pub struct FairMutex<T> {
     state: AtomicUsize,
+    parked: AtomicIsize,
     data: UnsafeCell<T>,
 }
 
 unsafe impl<T: Send> Send for FairMutex<T> {}
 unsafe impl<T: Sync> Sync for FairMutex<T> {}
 
-const TICKET_MASK: usize = (usize::MAX - ((1 << (usize::BITS / 2)) - 1)) & !PARKED_BIT; // the last 32 bits are set (except for the very last bit which is unset)
-const CURR_TICKET_MASK: usize = (1 << (usize::BITS / 2)) - 1;
-const PARKED_BIT: usize = 1 << (usize::BITS - 1);
+const TICKET_MASK: usize = (usize::MAX & !CURR_TICKET_MASK)/* & !PARKED_BIT*/; // the last 32 bits are set (except for the very last bit which is unset)
+const CURR_TICKET_MASK: usize = (1 << (usize::BITS / 2)) - 1; // the first 32 bits are set
+// const PARKED_BIT: usize = 1 << (usize::BITS - 1);
 
 impl<T> FairMutex<T> {
 
     pub const fn new(data: T) -> Self {
         Self {
             state: AtomicUsize::new(0),
+            parked: AtomicIsize::new(0),
             data: UnsafeCell::new(data),
         }
     }
@@ -30,6 +32,7 @@ impl<T> FairMutex<T> {
     #[inline]
     pub fn lock(&self) -> Guard<'_, T> {
         let ticket = self.state.fetch_add(SECOND_CNT_ONE, Ordering::Acquire) & TICKET_MASK;
+        println!("tid: {} ticket: {}", thread_id::get(), ticket);
 
         let mut spin_wait = SpinWait::new();
         let mut state = self.state.load(Ordering::Relaxed);
@@ -43,13 +46,13 @@ impl<T> FairMutex<T> {
             // spin_wait.spin();
 
             // If there is no queue, try spinning a few times
-            if state & PARKED_BIT == 0 && spin_wait.spin() {
+            if /*state & PARKED_BIT == 0 && */spin_wait.spin() {
                 state = self.state.load(Ordering::Relaxed);
                 continue;
             }
 
             // Set the parked bit
-            if state & PARKED_BIT == 0 {
+            /*if state & PARKED_BIT == 0 {
                 if let Err(x) = self.state.compare_exchange_weak(
                     state,
                     state | PARKED_BIT,
@@ -59,26 +62,27 @@ impl<T> FairMutex<T> {
                     state = x;
                     continue;
                 }
-            }
+            }*/
 
             // Park our thread until we are woken up by an unlock
             let addr = self as *const _ as usize;
             let validate = || {
                 // self.state.load(Ordering::Relaxed) == LOCKED_BIT | PARKED_BIT;
                 let state = self.state.load(Ordering::Relaxed);
-                (state & PARKED_BIT) != 0 && curr_ticket_to_ticket(get_curr_ticket(state))/*(state & PARKED_BIT) != 0 && ((state & !PARKED_BIT) >> (usize::BITS / 2))*/ != ticket
+                /*(state & PARKED_BIT) != 0 && */curr_ticket_to_ticket(get_curr_ticket(state))/*(state & PARKED_BIT) != 0 && ((state & !PARKED_BIT) >> (usize::BITS / 2))*/ != ticket
             };
             let before_sleep = || {};
             let timed_out = |_, was_last_thread| {
                 // Clear the parked bit if we were the last parked thread
-                if was_last_thread {
+                /*if was_last_thread {
                     self.state.fetch_and(!PARKED_BIT, Ordering::Relaxed);
-                }
+                }*/
             };
             // SAFETY:
             //   * `addr` is an address we control.
             //   * `validate`/`timed_out` does not panic or call into any function of `parking_lot`.
             //   * `before_sleep` does not call `park`, nor does it panic.
+            println!("parked tid {}", thread_id::get());
             match unsafe {
                 parking_lot_core::park(
                     addr,
@@ -137,7 +141,9 @@ impl<'a, T> Drop for Guard<'a, T> {
         // let req_token = (self.0.state.fetch_add(SECOND_CNT_ONE, Ordering::Release) & !PARKED_BIT) >> (usize::BITS / 2);
         let raw_req_token = self.0.state.load(Ordering::Relaxed);
         set_first_half(&self.0.state, (get_curr_ticket(raw_req_token) + 1) as Half, Ordering::Release);
-        let req_token = curr_ticket_to_ticket(get_curr_ticket(raw_req_token));
+        fence(Ordering::Acquire);
+        let req_token = curr_ticket_to_ticket(get_curr_ticket(raw_req_token) + 1);
+        println!("dopped: tid {} raw {} full {} other {}", thread_id::get(), raw_req_token, req_token, get_curr_ticket(raw_req_token) + 1);
 
         // Unpark one thread and leave the parked bit set if there might
         // still be parked threads on this address.
@@ -145,22 +151,22 @@ impl<'a, T> Drop for Guard<'a, T> {
         let callback = |result: UnparkResult| {
             // If we are using a fair unlock then we should keep the
             // mutex locked and hand it off to the unparked thread.
-            if true || /*true || */(result.unparked_threads != 0/* && (force_fair || result.be_fair)*/ && result.be_fair) {
+            if /*true || */(result.unparked_threads != 0/* && (force_fair || result.be_fair)*/ && result.be_fair) {
                 // Clear the parked bit if there are no more parked
                 // threads.
-                if !result.have_more_threads {
+                /*if !result.have_more_threads {
                     self.0.state.fetch_and(!PARKED_BIT, Ordering::Relaxed);
-                }
+                }*/
                 return DEFAULT_UNPARK_TOKEN/*TOKEN_HANDOFF*/;
             }
 
             // Clear the locked bit, and the parked bit as well if there
             // are no more parked threads.
-            if result.have_more_threads {
+            /*if result.have_more_threads {
                 self.0.state.fetch_or(PARKED_BIT, Ordering::Release);
             } else {
                 self.0.state.fetch_and(!PARKED_BIT, Ordering::Release);
-            }
+            }*/
             DEFAULT_UNPARK_TOKEN/*TOKEN_NORMAL*/
         };
         // SAFETY:
@@ -173,16 +179,18 @@ impl<'a, T> Drop for Guard<'a, T> {
             parking_lot_core::unpark_filter(addr, |token| {
                 if token == ParkToken(req_token) {
                     unparked = FilterOp::Stop;
+                    println!("unparked by tid {}", thread_id::get());
+                    self.0.parked.store(isize::MIN, Ordering::Relaxed);
                     FilterOp::Unpark
                 } else {
+                    println!("didn't unpark!");
                     unparked
                 }
             }, callback);
-            if unparked == FilterOp::Skip {
-                // println!("found none!");
-                parking_lot_core::unpark_all(addr, UnparkToken(req_token));
-            }
             // parking_lot_core::unpark_all(addr, UnparkToken(req_token));
+            /*if unparked == FilterOp::Skip && self.0.parked.load(Ordering::Relaxed) == req_token {
+                
+            }*/
         }
     }
 }

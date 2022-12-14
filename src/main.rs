@@ -20,6 +20,7 @@ mod fair_mutex_minimal;
 mod unfair_mutex_minimal;
 mod sharable_lock;
 mod atomic_stack;
+mod inlinable_ptr;
 
 use std::arch::asm;
 use std::cmp::Ordering;

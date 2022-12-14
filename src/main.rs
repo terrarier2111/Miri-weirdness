@@ -18,6 +18,8 @@ mod fair_mutex;
 mod unfair_mutex;
 mod fair_mutex_minimal;
 mod unfair_mutex_minimal;
+mod sharable_lock;
+mod atomic_stack;
 
 use std::arch::asm;
 use std::cmp::Ordering;

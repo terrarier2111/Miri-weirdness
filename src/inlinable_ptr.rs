@@ -1,38 +1,79 @@
 use std::cell::UnsafeCell;
-use std::mem;
-use std::mem::{align_of, MaybeUninit, size_of, transmute};
+use std::{mem, ptr};
+use std::boxed::ThinBox;
+use std::mem::{align_of, ManuallyDrop, MaybeUninit, size_of, transmute};
 use std::pin::Pin;
+use std::ptr::NonNull;
 
-pub struct SlimPtrMut<T, Create: FnMut(T) -> *mut T, CleanUp: FnMut(*mut T) -> T> {
-    ptr: UnsafeCell<MaybeUninit<*mut T>>,
+pub type SlimPtrMutDrop<T, const DROP: bool> = SlimPtrMutGeneric<T, |val| {
+    ThinBox::new()
+}, DROP>;
+
+pub trait Creator {}
+
+impl<I: FnMut(T) -> NonNull<T>, T> Creator for I {}
+
+pub trait CleanUp {}
+
+impl<I: FnMut(NonNull<T>) -> T, T> CleanUp for I {}
+
+// repr(C) won't impact perf negatively here as it only disallows field reordering optimizations
+// which aren't a thing anyways in this struct with only one `real` (non-zero sized) field
+#[repr(C)]
+pub struct SlimPtrMutGeneric<T, const Create: impl FnMut(T) -> NonNull<T>, const CleanUp: impl FnMut(NonNull<T>) -> T, const DROP: bool = false> {
+    ptr: [NonNull<T>; const {
+        if size_of::<T>() > size_of::<NonNull<T>>() || align_of::<T>() > align_of::<NonNull<T>>() {
+            1
+        } else {
+            0
+        }
+    }],
+    val: [ManuallyDrop<Unaligned<T>>; const {
+        if size_of::<T>() > size_of::<NonNull<T>>() || align_of::<T>() > align_of::<NonNull<T>>() {
+            0
+        } else {
+            1
+        }
+    }],
 }
 
-impl<T, Create: FnMut(T) -> *mut T, CleanUp: FnMut(*mut T) -> T> SlimPtrMut<T, Create, CleanUp> {
+impl<T, C: FnMut(T) -> NonNull<T>, CU: FnMut(NonNull<T>) -> T, const Create: C, const CleanUp: CU, const DROP: bool> SlimPtrMutGeneric<T, C, CU, Create, CleanUp> {
 
+    #[inline]
     pub fn new(val: T) -> Self {
-        let ptr = if size_of::<MaybeUninit<T>>() > size_of::<MaybeUninit<*mut T>>() || align_of::<MaybeUninit<T>>() > align_of::<MaybeUninit<*mut T>>() {
-            MaybeUninit::new(Create(val))
-        } else {
-            let mut ret = MaybeUninit::uninit();
-            if size_of::<MaybeUninit<T>>() > 0 {
-                unsafe { ret.as_mut_ptr().cast::<T>().write(val); }
+        if size_of::<T>() > size_of::<NonNull<T>>() || align_of::<T>() > align_of::<NonNull<T>>() {
+            Self {
+                ptr: [Create(val)],
+                val: [],
             }
-
-            ret
-        };
-        Self {
-            ptr: ptr.into(),
+        } else {
+            Self {
+                ptr: [],
+                val: [ManuallyDrop::new(Unaligned(val))],
+            }
         }
     }
 
     #[inline]
     pub fn as_ptr(&self) -> *const T {
-        self.as_ptr_mut()
+        if size_of::<T>() > size_of::<NonNull<T>>() || align_of::<T>() > align_of::<NonNull<T>>() {
+            // FIXME: can we remove the `unchecked` here?
+            unsafe { self.ptr.get_unchecked(0).as_ptr() }
+        } else {
+            // FIXME: can we remove the `unchecked` here?
+            unsafe { self.val.get_unchecked(0) as *const T }
+        }
     }
 
     #[inline]
-    pub fn as_ptr_mut(&self) -> *mut T {
-        unsafe { (&*self.ptr.get()).assume_init_read() }
+    pub fn as_ptr_mut(&mut self) -> *mut T {
+        if size_of::<T>() > size_of::<NonNull<T>>() || align_of::<T>() > align_of::<NonNull<T>>() {
+            // FIXME: can we remove the `unchecked` here?
+            unsafe { self.ptr.get_unchecked(0).as_ptr() }
+        } else {
+            // FIXME: can we remove the `unchecked` here?
+            unsafe { self.val.get_unchecked(0) as *mut T }
+        }
     }
 
     #[inline]
@@ -41,58 +82,90 @@ impl<T, Create: FnMut(T) -> *mut T, CleanUp: FnMut(*mut T) -> T> SlimPtrMut<T, C
     }
 
     #[inline]
-    pub fn as_mut(&self) -> &mut T {
+    pub fn as_mut(&mut self) -> &mut T {
         unsafe { &mut *self.as_ptr_mut() }
     }
 
     pub fn replace(&mut self, new: T) -> T {
-        if size_of::<MaybeUninit<T>>() > size_of::<MaybeUninit<*mut T>>() || align_of::<MaybeUninit<T>>() > align_of::<MaybeUninit<*mut T>>() {
-            let mut val = MaybeUninit::new(new);
-            let old = unsafe { self.ptr.get().read().assume_init().read() };
-            unsafe { self.ptr.get().replace(val); }
-            old
+        if size_of::<T>() > size_of::<NonNull<T>>() || align_of::<T>() > align_of::<NonNull<T>>() {
+            unsafe { self.ptr.get_unchecked(0).as_ptr().replace(new) }
         } else {
-            // unsafe { self.ptr.get().cast::<MaybeUninit<T>>().read().assume_init() }
-            unsafe { transmute::<*mut T, T>(self.ptr.into_inner().assume_init()) }
+            unsafe { mem::replace(self.val.get_unchecked_mut(0), new) }
         }
     }
 
-    pub fn into_val(self) -> T {
-        if size_of::<MaybeUninit<T>>() > size_of::<MaybeUninit<*mut T>>() || align_of::<MaybeUninit<T>>() > align_of::<MaybeUninit<*mut T>>() {
-            unsafe { self.ptr.into_inner().assume_init().read() }
+    pub fn into_val(mut self) -> T {
+        if size_of::<T>() > size_of::<NonNull<T>>() || align_of::<T>() > align_of::<NonNull<T>>() {
+            unsafe { self.ptr.get_unchecked(0).as_ptr().read() }
         } else {
-            // unsafe { self.ptr.get().cast::<MaybeUninit<T>>().read().assume_init() }
-            unsafe { transmute::<*mut T, T>(self.ptr.into_inner().assume_init()) }
-        }
-    }
-
-}
-
-pub struct SlimPtr<T, Create: FnMut(T) -> *const T, CleanUp: FnMut(*const T) -> T> {
-    ptr: MaybeUninit<*const T>,
-}
-
-impl<T, Create: FnMut(T) -> *const T, CleanUp: FnMut(*const T) -> T> SlimPtr<T, Create, CleanUp> {
-
-    pub fn new(val: T) -> Self {
-        let ptr = if size_of::<MaybeUninit<T>>() > size_of::<MaybeUninit<*const T>>() || align_of::<MaybeUninit<T>>() > align_of::<MaybeUninit<*const T>>() {
-            MaybeUninit::new(Create(val))
-        } else {
-            let mut ret = MaybeUninit::uninit();
-            if size_of::<MaybeUninit<T>>() > 0 {
-                unsafe { ret.as_mut_ptr().cast::<T>().write(val); }
-            }
-
+            // let ret = unsafe { self.val[0].0 };
+            let ret = unsafe { (self.val.get_unchecked(0) as *mut T).read() };
+            mem::forget(self);
             ret
-        };
-        Self {
-            ptr,
+        }
+    }
+
+}
+
+impl<T, C: FnMut(T) -> NonNull<T>, CU: FnMut(NonNull<T>) -> T, const Create: C, const CleanUp: CU, const DROP: bool> Drop for SlimPtrMutGeneric<T, C, CU, Create, CleanUp> {
+    fn drop(&mut self) {
+        if DROP {
+            if size_of::<T>() > size_of::<NonNull<T>>() || align_of::<T>() > align_of::<NonNull<T>>() {
+                unsafe { CleanUp(*self.ptr.get_unchecked(0)) };
+            } else {
+                // FIXME: can needs_drop improve the perf here or is the compiler able to figure this out on its own?
+                unsafe { (self.val.get_unchecked(0) as *mut T).read() };
+            }
+        }
+    }
+}
+
+// repr(C) won't impact perf negatively here as it only disallows field reordering optimizations
+// which aren't a thing anyways in this struct with only one `real` (non-zero sized) field
+#[repr(C)]
+pub struct SlimPtrGeneric<T, C: FnMut(T) -> NonNull<T>, CU: FnMut(NonNull<T>) -> T, const Create: C, const CleanUp: CU, const DROP: bool = false> {
+    ptr: [NonNull<T>; const {
+        if size_of::<T>() > size_of::<NonNull<T>>() || align_of::<T>() > align_of::<NonNull<T>>() {
+            1
+        } else {
+            0
+        }
+    }],
+    val: [ManuallyDrop<Unaligned<T>>; const {
+        if size_of::<T>() > size_of::<NonNull<T>>() || align_of::<T>() > align_of::<NonNull<T>>() {
+            0
+        } else {
+            1
+        }
+    }],
+}
+
+impl<T, C: FnMut(T) -> NonNull<T>, CU: FnMut(NonNull<T>) -> T, const Create: C, const CleanUp: CU, const DROP: bool> SlimPtrGeneric<T, C, CU, Create, CleanUp> {
+
+    #[inline]
+    pub fn new(val: T) -> Self {
+        if size_of::<T>() > size_of::<NonNull<T>>() || align_of::<T>() > align_of::<NonNull<T>>() {
+            Self {
+                ptr: [Create(val)],
+                val: [],
+            }
+        } else {
+            Self {
+                ptr: [],
+                val: [ManuallyDrop::new(Unaligned(val))],
+            }
         }
     }
 
     #[inline]
     pub fn as_ptr(&self) -> *const T {
-        self.as_ptr_mut()
+        if size_of::<T>() > size_of::<NonNull<T>>() || align_of::<T>() > align_of::<NonNull<T>>() {
+            // FIXME: can we remove the `unchecked` here?
+            unsafe { self.ptr.get_unchecked(0).as_ptr() }
+        } else {
+            // FIXME: can we remove the `unchecked` here?
+            unsafe { self.val.get_unchecked(0) as *const T }
+        }
     }
 
     #[inline]
@@ -100,12 +173,31 @@ impl<T, Create: FnMut(T) -> *const T, CleanUp: FnMut(*const T) -> T> SlimPtr<T, 
         unsafe { &*self.as_ptr() }
     }
 
-    pub fn into_val(self) -> T {
-        if size_of::<MaybeUninit<T>>() > size_of::<MaybeUninit<*const T>>() || align_of::<MaybeUninit<T>>() > align_of::<MaybeUninit<*const T>>() {
-            unsafe { self.ptr.assume_init().read() }
+    pub fn into_val(mut self) -> T {
+        if size_of::<T>() > size_of::<NonNull<T>>() || align_of::<T>() > align_of::<NonNull<T>>() {
+            unsafe { self.ptr.get_unchecked(0).as_ptr().read() }
         } else {
-            unsafe { transmute::<*const T, T>(self.ptr.assume_init()) }
+            // let ret = unsafe { self.val[0].0 };
+            let ret = unsafe { (self.val.get_unchecked(0) as *mut T).read() };
+            mem::forget(self);
+            ret
         }
     }
 
 }
+
+impl<T, C: FnMut(T) -> NonNull<T>, CU: FnMut(NonNull<T>) -> T, const Create: C, const CleanUp: CU, const DROP: bool> Drop for SlimPtrGeneric<T, C, CU, Create, CleanUp> {
+    fn drop(&mut self) {
+        if DROP {
+            if size_of::<T>() > size_of::<NonNull<T>>() || align_of::<T>() > align_of::<NonNull<T>>() {
+                unsafe { CleanUp(*self.ptr.get_unchecked(0)) };
+            } else {
+                // FIXME: can needs_drop improve the perf here or is the compiler able to figure this out on its own?
+                unsafe { (self.val.get_unchecked(0) as *const T).read() };
+            }
+        }
+    }
+}
+
+#[repr(packed)]
+struct Unaligned<T>(T);

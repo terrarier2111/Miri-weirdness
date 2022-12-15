@@ -9,6 +9,8 @@
 #![feature(strict_provenance_atomic_ptr)]
 #![feature(core_intrinsics)]
 #![feature(const_option_ext)]
+#![feature(inline_const)]
+#![feature(thin_box)]
 
 mod linked_list;
 mod rustlings;
@@ -217,7 +219,7 @@ fn main() {
     // println!("test: {:?}", test);
     // loop {}
 
-    let mutex = Arc::new(/*parking_lot::Mutex*//*FairMutex*//*parking_lot::*/fair_mutex_minimal::FairMutex/*unfair_mutex_minimal::UnfairMutex*//*FairMutex*/::new(20));
+    /*let mutex = Arc::new(/*parking_lot::Mutex*//*FairMutex*//*parking_lot::*/fair_mutex_minimal::FairMutex/*unfair_mutex_minimal::UnfairMutex*//*FairMutex*/::new(20));
     let mut threads = vec![];
     let start = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -241,7 +243,7 @@ fn main() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis();
-    println!("test took: {}ms", time - start);
+    println!("test took: {}ms", time - start);*/
 }
 
 /*

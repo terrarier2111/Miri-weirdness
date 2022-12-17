@@ -1,10 +1,11 @@
 use std::cell::UnsafeCell;
 use std::{mem, ptr};
 use std::boxed::ThinBox;
+use std::marker::PhantomData;
 use std::mem::{align_of, ManuallyDrop, MaybeUninit, size_of, transmute};
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
-use std::ptr::NonNull;
+use std::ptr::{NonNull, null, null_mut};
 
 // TODO: can we remove the `unchecked`s or are they required for the compiler to elide the bound-checks?
 
@@ -17,27 +18,24 @@ fn create_thin_box<T>() -> impl FnMut(T) -> NonNull<T> {
     }
 }
 
-// repr(C) won't impact perf negatively here as it only disallows field reordering optimizations
-// which aren't a thing anyways in this struct with only one `real` (non-zero sized) field
-#[repr(C)]
 pub struct SlimPtrMut<T> {
-    ptr: [NonNull<T>; const { T::PTRS_LEN }],
-    val: [ManuallyDrop<Unaligned<T>>; const { T::VALS_LEN }],
+    ptr: *mut T,
 }
 
 impl<T> SlimPtrMut<T> {
 
     #[inline]
-    pub fn new_with(val: T, create: impl FnMut(T) -> NonNull<T>) -> Self {
+    pub fn new_with(val: T, mut create: impl FnMut(T) -> *mut T) -> Self {
         if !is_inlined::<T>() {
             Self {
-                ptr: unsafe { transmute([create(val)]) },
-                val: unsafe { transmute([]) },
+                ptr: create(val),
             }
         } else {
+            let mut ptr = null_mut();
+            let val = Unaligned(val);
+            unsafe { ((&mut ptr) as *mut *mut T).cast::<Unaligned<T>>().write(val); }
             Self {
-                ptr: unsafe { transmute([]) },
-                val: unsafe { transmute([ManuallyDrop::new(Unaligned(val))]) },
+                ptr,
             }
         }
     }
@@ -45,31 +43,26 @@ impl<T> SlimPtrMut<T> {
     #[inline]
     pub fn as_ptr(&self) -> *const T {
         if !is_inlined::<T>() {
-            unsafe { self.ptr.get_unchecked(0).as_ptr() }
+            self.ptr
         } else {
-            unsafe { self.val.get_unchecked(0) as *const ManuallyDrop<Unaligned<T>> }.cast::<T>()
+            (&unsafe { &*((&self.ptr) as *const *mut T).cast::<Unaligned<T>>() }.0) as *const T
         }
     }
 
     #[inline]
     pub fn as_ptr_mut(&mut self) -> *mut T {
         if !is_inlined::<T>() {
-            unsafe { self.ptr.get_unchecked(0).as_ptr() }
+            self.ptr
         } else {
-            unsafe { self.val.get_unchecked_mut(0) as *mut ManuallyDrop<Unaligned<T>> }.cast::<T>()
+            (&mut unsafe { &mut *((&mut self.ptr) as *mut *mut T).cast::<Unaligned<T>>() }.0) as *mut T
         }
-    }
-
-    #[inline]
-    pub fn as_mut(&mut self) -> &mut T {
-        unsafe { &mut *self.as_ptr_mut() }
     }
 
     pub fn replace(&mut self, new: T) -> T {
         if !is_inlined::<T>() {
-            unsafe { self.ptr.get_unchecked(0).as_ptr().replace(new) }
+            unsafe { self.ptr.replace(new) }
         } else {
-            unsafe { mem::replace((&mut *(self.val.get_unchecked_mut(0) as *mut ManuallyDrop<Unaligned<T>>).cast::<T>()), new) }
+            unsafe { mem::replace(&mut (&mut *(((&mut self.ptr) as *mut *mut T).cast::<Unaligned<T>>())).0, new) }
         }
     }
 
@@ -120,27 +113,24 @@ impl<T> DerefMut for SlimPtrMut<T> {
     }
 }
 
-// repr(C) won't impact perf negatively here as it only disallows field reordering optimizations
-// which aren't a thing anyways in this struct with only one `real` (non-zero sized) field
-#[repr(C)]
 pub struct SlimPtr<T> {
-    ptr: [NonNull<T>; const { T::PTRS_LEN }],
-    val: [ManuallyDrop<Unaligned<T>>; const { T::VALS_LEN }],
+    ptr: *const T,
 }
 
 impl<T> SlimPtr<T> {
 
     #[inline]
-    pub fn new_with(val: T, create: impl FnMut(T) -> NonNull<T>) -> Self {
+    pub fn new_with(val: T, mut create: impl FnMut(T) -> *const T) -> Self {
         if !is_inlined::<T>() {
             Self {
-                ptr: unsafe { transmute([create(val)]) },
-                val: unsafe { transmute([]) },
+                ptr: create(val),
             }
         } else {
+            let mut ptr = null_mut();
+            let val = Unaligned(val);
+            unsafe { (&mut ptr as *mut *mut T).cast::<Unaligned<T>>().write(val); }
             Self {
-                ptr: unsafe { transmute([]) },
-                val: unsafe { transmute([ManuallyDrop::new(Unaligned(val))]) },
+                ptr,
             }
         }
     }
@@ -148,9 +138,9 @@ impl<T> SlimPtr<T> {
     #[inline]
     pub fn as_ptr(&self) -> *const T {
         if !is_inlined::<T>() {
-            unsafe { self.ptr.get_unchecked(0).as_ptr() }
+            self.ptr
         } else {
-            unsafe { self.val.get_unchecked(0) as *const ManuallyDrop<Unaligned<T>> }.cast::<T>()
+            (&unsafe { &*((&self.ptr) as *const *const T).cast::<Unaligned<T>>() }.0) as *const T
         }
     }
 
@@ -188,23 +178,31 @@ impl<T> Deref for SlimPtr<T> {
 }
 
 #[inline]
-pub fn needs_cleanup<T>() -> bool {
+pub const fn needs_cleanup<T>() -> bool {
     !is_inlined::<T>()
 }
 
+#[derive(Copy, Clone)]
+pub struct UnsafeToken<'a, T> {
+    ptr: *const T,
+    _phantom_data: PhantomData<&'a ()>,
+}
+
+/*
 trait Lengths: Sized {
     const PTRS_LEN: usize = ptrs_len::<Self>();
     const VALS_LEN: usize = vals_len::<Self>();
 }
 
-impl<T> Lengths for T {}
+impl<T> Lengths for T {}*/
 
+#[inline]
 const fn is_inlined<T>() -> bool {
     !(size_of::<T>() > size_of::<NonNull<T>>() || align_of::<T>() > align_of::<NonNull<T>>())
 }
 
 const fn ptrs_len<T>() -> usize {
-    if size_of::<T>() > size_of::<NonNull<T>>() || align_of::<T>() > align_of::<NonNull<T>>() {
+    if !is_inlined::<T>() {
         1
     } else {
         0
@@ -212,7 +210,7 @@ const fn ptrs_len<T>() -> usize {
 }
 
 const fn vals_len<T>() -> usize {
-    if size_of::<T>() > size_of::<NonNull<T>>() || align_of::<T>() > align_of::<NonNull<T>>() {
+    if !is_inlined::<T>() {
         0
     } else {
         1

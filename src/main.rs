@@ -26,6 +26,7 @@ mod unfair_mutex_minimal;
 mod sharable_lock;
 mod atomic_stack;
 mod inlinable_ptr;
+mod stable_inlinable_ptr;
 // mod inline_dyn;
 
 use std::arch::asm;

@@ -11,6 +11,9 @@
 #![feature(const_option_ext)]
 #![feature(inline_const)]
 #![feature(thin_box)]
+#![feature(coerce_unsized)]
+#![feature(ptr_metadata)]
+#![feature(generic_const_exprs)]
 
 mod linked_list;
 mod rustlings;
@@ -23,6 +26,7 @@ mod unfair_mutex_minimal;
 mod sharable_lock;
 mod atomic_stack;
 mod inlinable_ptr;
+// mod inline_dyn;
 
 use std::arch::asm;
 use std::cmp::Ordering;

@@ -456,7 +456,8 @@ impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NODE_KIND, fals
         // let node_ptr = Arc::as_ptr(node);
         let mut next;
         loop {
-            println!("in loop: {} | {}", self.right.ptr.intermediate_ref_cnt.load(Ordering::Acquire), self.right.ptr.curr_ref_cnt.load(Ordering::Acquire));
+            // println!("in loop: {} | {}", self.right.ptr.intermediate_ref_cnt.load(Ordering::Acquire), self.right.ptr.curr_ref_cnt.load(Ordering::Acquire));
+            println!("in loop");
             next = self.right.get_full()/*self.right.get()*/; // = tail // FIXME: MIRI flags this because apparently the SwapArc here gets dropped while performing the `get_full` operation.
             println!("got full!");
             unsafe {
@@ -944,7 +945,7 @@ impl<T, const NODE_KIND: NodeKind> Link<T, NODE_KIND> {
             /*Ordering::Relaxed*/Self::CAS_ORDERING,
         );
         */
-        self.ptr.update_raw(new);
+        self.ptr.store_raw(new);
 
 
 
@@ -978,7 +979,7 @@ impl<T, const NODE_KIND: NodeKind> Link<T, NODE_KIND> {
     #[inline]
     fn invalid() -> Self {
         Self {
-            ptr: Aligned(SwapArcIntermediateTLS::new(None)),
+            ptr: Aligned(SwapArcIntermediateTLS::new(None).into()),
         }
     }
 }
@@ -1267,109 +1268,3 @@ impl<T> Drop for SizedBox<T> {
         }
     }
 }
-
-/*
-pub struct DropOwned {
-
-}
-
-pub enum DropStrategy {
-    MemCpy, // this uses MaybeUninit and mem::replace
-    Deref,  // this uses Option::take
-}*/
-
-pub trait OwnedDrop: Sized {
-
-    fn drop_owned(self);
-
-}
-
-#[repr(transparent)]
-pub struct DropOwnedMemCpy<T: OwnedDrop> {
-    inner: MaybeUninit<T>,
-}
-
-impl<T: OwnedDrop> DropOwnedMemCpy<T> {
-
-    pub fn new(val: T) -> Self {
-        Self {
-            inner: MaybeUninit::new(val),
-        }
-    }
-
-}
-
-impl<T: OwnedDrop> Drop for DropOwnedMemCpy<T> {
-    fn drop(&mut self) {
-        let owned = mem::replace(&mut self.inner, MaybeUninit::uninit());
-        // SAFETY: This is safe because the previous inner value has to be
-        // initialized because `DropOwnedMemCpy` can only be created with
-        // an initialized value.
-        unsafe { owned.assume_init() }.drop_owned();
-    }
-}
-
-impl<T: OwnedDrop> Deref for DropOwnedMemCpy<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { self.inner.assume_init_ref() }
-    }
-}
-
-impl<T: OwnedDrop> DerefMut for DropOwnedMemCpy<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { self.inner.assume_init_mut() }
-    }
-}
-
-impl<T: OwnedDrop> From<T> for DropOwnedMemCpy<T> {
-    fn from(val: T) -> Self {
-        DropOwnedMemCpy::new(val)
-    }
-}
-
-/*
-pub struct DropOwnedDeref<T: OwnedDrop> {
-    inner: Option<T>,
-}
-
-impl<T: OwnedDrop> DropOwnedDeref<T> {
-
-    pub fn new(val: T) -> Self {
-        Self {
-            inner: Some(val),
-        }
-    }
-
-}
-
-impl<T: OwnedDrop> Drop for DropOwnedDeref<T> {
-    fn drop(&mut self) {
-        let owned = self.inner.take();
-        // SAFETY: This is safe because the previous inner value has to be
-        // initialized because `DropOwnedMemCpy` can only be created with
-        // an initialized value.
-        unsafe { owned.unwrap_unchecked() }.drop_owned();
-    }
-}
-
-impl<T: OwnedDrop> Deref for DropOwnedDeref<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { self.inner.as_ref().unwrap_unchecked() }
-    }
-}
-
-impl<T: OwnedDrop> DerefMut for DropOwnedDeref<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { self.inner.as_mut().unwrap_unchecked() }
-    }
-}
-
-impl<T: OwnedDrop> From<T> for DropOwnedDeref<T> {
-    fn from(val: T) -> Self {
-        DropOwnedDeref::new(val)
-    }
-}*/

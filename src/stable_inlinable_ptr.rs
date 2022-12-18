@@ -5,14 +5,14 @@ use std::marker::PhantomData;
 use std::mem::{align_of, ManuallyDrop, MaybeUninit, size_of, transmute};
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
-use std::ptr::{NonNull, null, null_mut};
+use std::ptr::{addr_of, addr_of_mut, NonNull, null, null_mut};
 
-// TODO: can we remove the `unchecked`s or are they required for the compiler to elide the bound-checks?
+// FIXME: add safety comments mentioning non-moving requirements (pinning)
 
-fn create_thin_box<T>() -> impl FnMut(T) -> NonNull<T> {
+pub fn create_thin_box<T>() -> impl FnMut(T) -> *mut T {
     |val| {
         let mut bx = ThinBox::new(val);
-        let ret = NonNull::new(bx.deref_mut() as *mut T).unwrap();
+        let ret = bx.deref_mut() as *mut T;
         mem::forget(bx);
         ret
     }
@@ -31,38 +31,77 @@ impl<T> SlimPtrMut<T> {
                 ptr: create(val),
             }
         } else {
-            let mut ptr = null_mut();
-            let val = Unaligned(val);
-            unsafe { ((&mut ptr) as *mut *mut T).cast::<Unaligned<T>>().write(val); }
+            let mut ptr: *mut T = null_mut();
+            let addr = addr_of_mut!(ptr);
+            unsafe { addr.cast::<UnsafeCell<T>>().write(UnsafeCell::new(val)); }
             Self {
                 ptr,
             }
         }
     }
 
+    /*pub fn new_pinned(val: &mut Pin<T>) -> Self where T: Sized + Copy + Clone + Unpin {
+        if !is_inlined::<T>() {
+            Self {
+                ptr: (val as *mut Pin<T>).cast::<T>(),
+            }
+        } else {
+            let mut ptr: *mut T = null_mut();
+            let addr = addr_of_mut!(ptr);
+            unsafe { addr.cast::<UnsafeCell<T>>().write(UnsafeCell::new(transmute::<Pin<T>, T>(*val))); }
+            Self {
+                ptr,
+            }
+        }
+    }*/
+
+    /// Note: the returned pointer is only guaranteed to be valid as long as
+    /// this instance of `SlimPtrMut` is alive.
     #[inline]
     pub fn as_ptr(&self) -> *const T {
         if !is_inlined::<T>() {
             self.ptr
         } else {
-            (&unsafe { &*((&self.ptr) as *const *mut T).cast::<Unaligned<T>>() }.0) as *const T
+            unsafe { (&*addr_of!(self.ptr).cast::<UnsafeCell<T>>()) }.get()
         }
     }
 
+    /// Note: the returned pointer is only guaranteed to be valid as long as
+    /// this instance of `SlimPtrMut` is alive.
     #[inline]
     pub fn as_ptr_mut(&mut self) -> *mut T {
         if !is_inlined::<T>() {
             self.ptr
         } else {
-            (&mut unsafe { &mut *((&mut self.ptr) as *mut *mut T).cast::<Unaligned<T>>() }.0) as *mut T
+            unsafe { (&*addr_of!(self.ptr).cast::<UnsafeCell<T>>()) }.get()
         }
     }
 
+    #[inline]
     pub fn replace(&mut self, new: T) -> T {
-        if !is_inlined::<T>() {
-            unsafe { self.ptr.replace(new) }
+        // SAFETY: This is safe because we know that we are the only
+        // one with access to the data (no references outside this function exist at this time)
+        unsafe { self.as_ptr_mut().replace(new) }
+    }
+
+    #[inline]
+    pub fn into_inner(self) -> T {
+        // SAFETY: This is safe because we know that we are the only
+        // one with access to the data (no references outside this function exist at this time)
+        unsafe { self.as_ptr().read() }
+    }
+
+    #[inline]
+    pub fn token(&self) -> UnsafeToken<'_, T, ReadWriteAccess> {
+        /*let ptr = if !is_inlined::<T>() {
+            self.ptr
         } else {
-            unsafe { mem::replace(&mut (&mut *(((&mut self.ptr) as *mut *mut T).cast::<Unaligned<T>>())).0, new) }
+            unsafe { &*addr_of!(self.ptr).cast::<UnsafeCell<T>>() }.get()
+        };*/
+        let ptr = self.as_ptr().cast_mut();
+        UnsafeToken {
+            ptr,
+            _phantom_data: Default::default(),
         }
     }
 
@@ -82,21 +121,6 @@ impl<T> AsMut<T> for SlimPtrMut<T> {
     }
 }
 
-/*
-impl<T> Into<T> for SlimPtrMut<T> {
-    #[inline]
-    fn into(self) -> T {
-        if size_of::<T>() > size_of::<NonNull<T>>() || align_of::<T>() > align_of::<NonNull<T>>() {
-            unsafe { self.ptr.get_unchecked(0).as_ptr().read() }
-        } else {
-            // let ret = unsafe { self.val[0].0 };
-            let ret = unsafe { (self.val.get_unchecked(0) as *mut ManuallyDrop<T>).read() }.into();
-            mem::forget(self);
-            ret
-        }
-    }
-}*/
-
 impl<T> Deref for SlimPtrMut<T> {
     type Target = T;
 
@@ -114,33 +138,54 @@ impl<T> DerefMut for SlimPtrMut<T> {
 }
 
 pub struct SlimPtr<T> {
-    ptr: *const T,
+    ptr: *mut T,
 }
 
 impl<T> SlimPtr<T> {
 
     #[inline]
-    pub fn new_with(val: T, mut create: impl FnMut(T) -> *const T) -> Self {
+    pub fn new_with(val: T, mut create: impl FnMut(T) -> *mut T) -> Self {
         if !is_inlined::<T>() {
             Self {
                 ptr: create(val),
             }
         } else {
-            let mut ptr = null_mut();
-            let val = Unaligned(val);
-            unsafe { (&mut ptr as *mut *mut T).cast::<Unaligned<T>>().write(val); }
+            let mut ptr: *mut T = null_mut();
+            let addr = addr_of_mut!(ptr);
+            unsafe { addr.cast::<T>().write(val); }
             Self {
                 ptr,
             }
         }
     }
 
+    /// Note: the returned pointer is only guaranteed to be valid as long as
+    /// this instance of `SlimPtr` is alive.
     #[inline]
     pub fn as_ptr(&self) -> *const T {
         if !is_inlined::<T>() {
             self.ptr
         } else {
-            (&unsafe { &*((&self.ptr) as *const *const T).cast::<Unaligned<T>>() }.0) as *const T
+            addr_of!(self.ptr).cast::<T>()
+        }
+    }
+
+    #[inline]
+    pub fn into_inner(self) -> T {
+        unsafe { self.as_ptr().read() }
+    }
+
+    #[inline]
+    pub fn token(&self) -> UnsafeToken<'_, T, ReadAccess> {
+        /*let ptr = if !is_inlined::<T>() {
+            self.ptr
+        } else {
+            addr_of_mut!(self.ptr).cast::<T>()
+        };*/
+        let ptr = self.as_ptr().cast_mut();
+        UnsafeToken {
+            ptr,
+            _phantom_data: Default::default(),
         }
     }
 
@@ -152,21 +197,6 @@ impl<T> AsRef<T> for SlimPtr<T> {
         unsafe { &*self.as_ptr() }
     }
 }
-
-/*
-impl<T> Into<T> for SlimPtr<T> {
-    #[inline]
-    fn into(self) -> T {
-        if size_of::<T>() > size_of::<NonNull<T>>() || align_of::<T>() > align_of::<NonNull<T>>() {
-            unsafe { self.ptr.get_unchecked(0).as_ptr().read() }
-        } else {
-            // let ret = unsafe { self.val[0].0 };
-            let ret = unsafe { (self.val.get_unchecked(0) as *mut ManuallyDrop<T>).read() }.into();
-            mem::forget(self);
-            ret
-        }
-    }
-}*/
 
 impl<T> Deref for SlimPtr<T> {
     type Target = T;
@@ -183,39 +213,67 @@ pub const fn needs_cleanup<T>() -> bool {
 }
 
 #[derive(Copy, Clone)]
-pub struct UnsafeToken<'a, T> {
-    ptr: *const T,
-    _phantom_data: PhantomData<&'a ()>,
+pub struct UnsafeToken<'a, T, Access> {
+    ptr: *mut T,
+    _phantom_data: PhantomData<&'a Access>,
+}
+
+impl<'a, T, Access> UnsafeToken<'a, T, Access> {
+
+    /// Reads the value from the pointer.
+    ///
+    /// Safety: The caller has to ensure that no mutable reference to the
+    /// `SlimPtr` or `SlimPtrMut` of origin exists and that no double
+    /// drop occurs or that a double drop/duplication of the instance of
+    /// `T` isn't problematic.
+    /// Additionally, see [`ptr::read`] for safety concerns and examples.
+    #[inline]
+    pub unsafe fn read(&self) -> T {
+        self.ptr.read()
+    }
+
+}
+
+impl<'a, T> UnsafeToken<'a, T, ReadWriteAccess> {
+
+    /// Writes `val` to the pointer.
+    ///
+    /// Safety: The caller has to ensure that no reference to the
+    /// `SlimPtr` or `SlimPtrMut` of origin exists and that the
+    /// current instance of `T` stored at the location of the
+    /// pointer gets dropped if necessary.
+    /// Additionally, see [`ptr::write`] for safety concerns and examples.
+    #[inline]
+    pub unsafe fn write(&self, val: T) {
+        self.ptr.write(val);
+    }
+
+    /// Replaces the current value with `new`.
+    ///
+    /// Safety: The caller has to ensure that no reference to the
+    /// `SlimPtr` or `SlimPtrMut` of origin exists.
+    /// Additionally, see [`ptr::replace`] for safety concerns and examples.
+    #[inline]
+    pub unsafe fn replace(&self, new: T) -> T {
+        self.ptr.replace(new)
+    }
+
 }
 
 /*
-trait Lengths: Sized {
-    const PTRS_LEN: usize = ptrs_len::<Self>();
-    const VALS_LEN: usize = vals_len::<Self>();
-}
+struct If<const B: bool>;
 
-impl<T> Lengths for T {}*/
+trait True {}
+
+impl True for If<true> {}
+
+impl<T> Unpin for SlimPtrMut<T> where If<{ !is_inlined::<T>() }>: True {}*/
+
+struct ReadAccess;
+
+struct ReadWriteAccess;
 
 #[inline]
 const fn is_inlined<T>() -> bool {
-    !(size_of::<T>() > size_of::<NonNull<T>>() || align_of::<T>() > align_of::<NonNull<T>>())
+    !(size_of::<UnsafeCell<T>>() > size_of::<*mut T>() || align_of::<UnsafeCell<T>>() > align_of::<*mut T>())
 }
-
-const fn ptrs_len<T>() -> usize {
-    if !is_inlined::<T>() {
-        1
-    } else {
-        0
-    }
-}
-
-const fn vals_len<T>() -> usize {
-    if !is_inlined::<T>() {
-        0
-    } else {
-        1
-    }
-}
-
-#[repr(packed)]
-struct Unaligned<T>(T);

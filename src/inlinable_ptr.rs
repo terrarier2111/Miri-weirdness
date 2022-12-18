@@ -1,3 +1,4 @@
+/*
 use std::cell::UnsafeCell;
 use std::{mem, ptr};
 use std::boxed::ThinBox;
@@ -221,3 +222,4 @@ const fn vals_len<T>() -> usize {
 
 #[repr(packed)]
 struct Unaligned<T>(T);
+*/

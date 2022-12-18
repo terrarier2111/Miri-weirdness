@@ -1,18 +1,18 @@
-#![feature(new_uninit)]
-#![feature(int_roundings)]
-#![feature(once_cell)]
+// #![feature(new_uninit)]
+// #![feature(int_roundings)]
+// #![feature(once_cell)]
 #![feature(strict_provenance)]
 #![feature(adt_const_params)]
 #![feature(arbitrary_self_types)]
 #![feature(const_result_drop)]
 #![feature(const_option)]
-#![feature(strict_provenance_atomic_ptr)]
+// #![feature(strict_provenance_atomic_ptr)]
 #![feature(core_intrinsics)]
-#![feature(const_option_ext)]
-#![feature(inline_const)]
+// #![feature(const_option_ext)]
+// #![feature(inline_const)]
 #![feature(thin_box)]
-#![feature(coerce_unsized)]
-#![feature(ptr_metadata)]
+// #![feature(coerce_unsized)]
+// #![feature(ptr_metadata)]
 #![feature(generic_const_exprs)]
 
 mod linked_list;
@@ -45,9 +45,12 @@ use crate::fair_mutex::FairMutex;
 use crate::fair_mutex_minimal::TICKET_MASK;
 use crate::linked_list::LinkedList;
 use crate::rustlings::test_main;
+use crate::stable_inlinable_ptr::SlimPtr;
 use crate::unfair_mutex::UnfairMutex;
 
 fn main() {
+    let ptr = SlimPtr::new_with(3, stable_inlinable_ptr::create_thin_box());
+    println!("{}", *ptr.as_ref());
     /*let mut fake_mutex = fair_mutex_minimal::FairMutex::new(30);
     let guard = black_box(fair_mutex_minimal::lock_cool_name(&fake_mutex));
     black_box(fair_mutex_minimal::drop_cool_name(&guard));

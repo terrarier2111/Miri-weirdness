@@ -12,6 +12,7 @@ use std::borrow::Borrow;
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
 use std::pin::Pin;
+use swap_arc::{SwapArc, SwapArcAny, SwapArcAnyMeta, SwapArcFullPtrGuard, SwapArcPtrGuard};
 
 // disable MIRI SB(stacked borrows) checks
 
@@ -25,14 +26,14 @@ use std::pin::Pin;
 // FIXME: add guard to nodes in Unbound mode to remove them once all of the references to them get dropped
 // FIXME: employ reference counting on the nodes in order for them to be dropped correctly
 #[derive(Clone)]
-pub struct AtomicDoublyLinkedList<T, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
+pub struct AtomicDoublyLinkedList<T: Send + Sync, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
     header_node: Arc<RawNode<T, NODE_KIND>>,
     // in the header node itself, the left field points to the `header_node` field of the list itself, so we don't have to maintain a reference count
     tail_node: Arc<RawNode<T, NODE_KIND>>,
     // in the tail node itself, the right field points to the `tail_node` field of the list itself, so we don't have to maintain a reference count
 }
 
-impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedList<T, NODE_KIND> {
+impl<T: Send + Sync, const NODE_KIND: NodeKind> AtomicDoublyLinkedList<T, NODE_KIND> {
     const ENDS_ORDERING: Ordering = Ordering::SeqCst;
 
     pub fn new() -> Arc<Self> {
@@ -225,7 +226,7 @@ impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedList<T, NODE_KIND> {
     // FIXME: add iter method!
 }
 
-impl<T, const NODE_KIND: NodeKind> Drop for AtomicDoublyLinkedList<T, NODE_KIND> {
+impl<T: Send + Sync, const NODE_KIND: NodeKind> Drop for AtomicDoublyLinkedList<T, NODE_KIND> {
     fn drop(&mut self) {
         // remove all nodes in the list, when the list gets dropped,
         // this makes sure that all the nodes' state is consistent
@@ -256,7 +257,7 @@ pub enum NodeKind {
 // in order to accomplish this we are always using this type in combination with Aligned<4, Self>
 // #[derive(Debug)]
 pub struct AtomicDoublyLinkedListNode<
-    T,
+    T: Send + Sync,
     const NODE_KIND: NodeKind = { NodeKind::Bound },
     const DELETED: bool = false,
 > {
@@ -268,7 +269,7 @@ pub struct AtomicDoublyLinkedListNode<
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-impl<T> AtomicDoublyLinkedListNode<T, { NodeKind::Bound }, false> {
+impl<T: Send + Sync> AtomicDoublyLinkedListNode<T, { NodeKind::Bound }, false> {
     pub fn remove(self: &Arc<Aligned<A4, Self>>) -> Option<Node<T, { NodeKind::Bound }, true>> {
         // let this = Arc::as_ptr(self) as *const RawNode<T, { NodeKind::Bound }>;
         // let _tmp = self.left.get();
@@ -290,7 +291,7 @@ impl<T> AtomicDoublyLinkedListNode<T, { NodeKind::Bound }, false> {
                 return None;
             }
             println!("pre set right!");
-            println!("right: curr refs {} | intermediate refs: {}", self.right.ptr.curr_ref_cnt.load(Ordering::SeqCst), self.right.ptr.intermediate_ref_cnt.load(Ordering::SeqCst));
+            // println!("right: curr refs {} | intermediate refs: {}", self.right.ptr.curr_ref_cnt.load(Ordering::SeqCst), self.right.ptr.intermediate_ref_cnt.load(Ordering::SeqCst));
             let tmp = self.right.get();
             let tmp_right = ManuallyDrop::new(unsafe { Arc::from_raw(tmp.get_ptr()) });
             // let tmp_left = ManuallyDrop::new(unsafe { Arc::from_raw(self.left.get().get_ptr().as_ref().unwrap()) });
@@ -309,7 +310,7 @@ impl<T> AtomicDoublyLinkedListNode<T, { NodeKind::Bound }, false> {
                     }
                 }
                 println!("pre head stuff!");
-                println!("right: curr refs {} | intermediate refs: {}", self.right.ptr.curr_ref_cnt.load(Ordering::SeqCst), self.right.ptr.intermediate_ref_cnt.load(Ordering::SeqCst));
+                // println!("right: curr refs {} | intermediate refs: {}", self.right.ptr.curr_ref_cnt.load(Ordering::SeqCst), self.right.ptr.intermediate_ref_cnt.load(Ordering::SeqCst));
                 let tmp = self.right.get();
                 let tmp_right = ManuallyDrop::new(unsafe { Arc::from_raw(tmp.get_ptr()) });
                 // let tmp_left = ManuallyDrop::new(unsafe { Arc::from_raw(self.left.get().get_ptr().as_ref().unwrap()) });
@@ -352,7 +353,7 @@ impl<T> AtomicDoublyLinkedListNode<T, { NodeKind::Bound }, false> {
     }
 }
 
-impl<T> AtomicDoublyLinkedListNode<T, { NodeKind::Unbound }, false> {
+impl<T: Send + Sync> AtomicDoublyLinkedListNode<T, { NodeKind::Unbound }, false> {
     pub fn remove(self: Arc<Aligned<A4, Self>>) -> Option<Node<T, { NodeKind::Bound }, true>> {
         /*fn inner_remove<T>(slf: &Arc<Aligned<A4, AtomicDoublyLinkedListNode<T, { NodeKind::Unbound }, false>>>) -> Option<()> {
             // let this = Arc::as_ptr(self) as *const RawNode<T, { NodeKind::Unbound }>;
@@ -406,7 +407,7 @@ impl<T> AtomicDoublyLinkedListNode<T, { NodeKind::Unbound }, false> {
     }
 }
 
-impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NODE_KIND, false> {
+impl<T: Send + Sync, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NODE_KIND, false> {
     pub fn add_after(self: &Arc<Aligned<A4, Self>>, val: T) -> Node<T, NODE_KIND> {
         let node = Arc::new/*pin*/(Aligned(AtomicDoublyLinkedListNode {
             val: MaybeUninit::new(val),
@@ -740,7 +741,7 @@ impl<T, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NODE_KIND, fals
     }
 }
 
-impl<T, const NODE_KIND: NodeKind, const DELETED: bool>
+impl<T: Send + Sync, const NODE_KIND: NodeKind, const DELETED: bool>
     AtomicDoublyLinkedListNode<T, NODE_KIND, DELETED>
 {
     /// checks whether the node is detached from the list or not
@@ -773,7 +774,7 @@ impl<T, const NODE_KIND: NodeKind, const DELETED: bool>
     }*/
 }
 
-impl<T, const NODE_KIND: NodeKind, const DELETED: bool> Drop
+impl<T: Send + Sync, const NODE_KIND: NodeKind, const DELETED: bool> Drop
     for AtomicDoublyLinkedListNode<T, NODE_KIND, DELETED>
 {
     fn drop(&mut self) {
@@ -801,23 +802,29 @@ const DELETION_MARKER: usize = 1 << 1/*63*/;
 const DETACHED_MARKER: usize = 1 << 0/*62*/; // FIXME: can we replace this marker with nulling pointers?
 
 // #[derive(Debug)]
-struct Link<T, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
+struct Link<T: Send + Sync, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
     // ptr: Aligned<A4, AtomicPtr<RawNode<T, NODE_KIND>>>,
-    ptr: Aligned<A4, Arc<SwapArcIntermediate<RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>/*Option<Arc<RawNode<T, NODE_KIND>>>*/, 2>>>,
+    ptr: Aligned<A4, Arc<SwapArcAnyMeta<(), Option<Arc<()>>, 0>>/*Arc<SwapArcAnyMeta<RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>/*Option<Arc<RawNode<T, NODE_KIND>>>*/, 2>>*/>,
+    _phantom_data: PhantomData<T>,
 }
 
-impl<T, const NODE_KIND: NodeKind> Link<T, NODE_KIND> {
+impl<T: Send + Sync, const NODE_KIND: NodeKind> Link<T, NODE_KIND> {
     const CAS_ORDERING: Ordering = Ordering::SeqCst;
+
+    #[inline(always)]
+    fn ptr_inner(&self) -> &Aligned<A4, Arc<SwapArcAnyMeta<RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>, 2>>> {
+        unsafe { (&self.ptr as *const Aligned<A4, Arc<SwapArcAnyMeta<(), Option<Arc<()>>, 0>>>).cast::<Aligned<A4, Arc<SwapArcAnyMeta<RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>, 2>>>>().as_ref().unwrap_unchecked() }
+    }
 
     fn get(&self) -> LinkContent<'_, T, NODE_KIND/*SwapArcIntermediatePtrGuard<'_, RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>*//*, LinkContent<T, NODE_KIND>*/>/*LinkContent<T, NODE_KIND>*//*SwapArcIntermediateGuard<'_, LinkContent<T, NODE_KIND>>*/ {
         LinkContent {
-            ptr: unsafe { self.ptr.load_raw() },
+            ptr: unsafe { self.ptr_inner().load_raw() },
         }
     }
 
     fn get_full(&self) -> FullLinkContent<T, NODE_KIND> {
         FullLinkContent {
-            ptr: self.ptr.load_raw_full(),
+            ptr: self.ptr_inner().load_raw_full(),
         }
     }
 
@@ -827,7 +834,7 @@ impl<T, const NODE_KIND: NodeKind> Link<T, NODE_KIND> {
     }*/
 
     fn get_meta(&self) -> Metadata {
-        Metadata(self.ptr.load_metadata())
+        Metadata(self.ptr_inner().load_metadata())
     }
 
     fn set_deletion_mark(&self) {
@@ -856,7 +863,7 @@ impl<T, const NODE_KIND: NodeKind> Link<T, NODE_KIND> {
                 }
             }
         }*/
-        self.ptr.set_in_metadata(DELETION_MARKER);
+        self.ptr_inner().set_in_metadata(DELETION_MARKER);
     }
 
     fn try_set_addr_full/*<const SET_DELETION_MARKER: bool>*/(
@@ -886,7 +893,7 @@ impl<T, const NODE_KIND: NodeKind> Link<T, NODE_KIND> {
         }
 
         res*/
-        unsafe { self.ptr.try_compare_exchange::<false>(old, Some(new)) }
+        unsafe { self.ptr_inner().try_compare_exchange_ignore_meta(old, new.deref() as *const _) }
     }
 
     fn try_set_addr_full_with_meta/*<const SET_DELETION_MARKER: bool>*/(
@@ -916,12 +923,12 @@ impl<T, const NODE_KIND: NodeKind> Link<T, NODE_KIND> {
         }
 
         res*/
-        unsafe { self.ptr.try_compare_exchange_with_meta(old, new) }
+        unsafe { self.ptr_inner().try_compare_exchange_with_meta(old, new) }
     }
 
     fn try_set_deletion_marker/*<const SET_DELETION_MARKER: bool>*/(&self, old: NodePtr<T, NODE_KIND>) -> bool {
         // self.try_set_addr_full::<true/*SET_DELETION_MARKER*/>(old, old)
-        self.ptr.try_update_meta(old, DELETION_MARKER)
+        self.ptr_inner().try_update_meta(old, DELETION_MARKER)
     }
 
     // SAFETY: This may only be used on new nodes that are in no way
@@ -938,7 +945,7 @@ impl<T, const NODE_KIND: NodeKind> Link<T, NODE_KIND> {
             /*Ordering::Relaxed*/Self::CAS_ORDERING,
         );
         */
-        self.ptr.update_raw(new);
+        self.ptr_inner().store_raw(new);
 
 
 
@@ -972,7 +979,8 @@ impl<T, const NODE_KIND: NodeKind> Link<T, NODE_KIND> {
     #[inline]
     fn invalid() -> Self {
         Self {
-            ptr: Aligned(SwapArcIntermediate::new(None)),
+            ptr: Aligned(Arc::new(SwapArcAnyMeta::new(None))),
+            _phantom_data: Default::default(),
         }
     }
 }
@@ -992,12 +1000,12 @@ fn strongest_failure_ordering(order: Ordering) -> Ordering {
 
 // FIXME: always pass this around wrapped inside a guard!
 // #[derive(Copy, Clone, Debug)]
-struct LinkContent<'a, T, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
+struct LinkContent<'a, T: Send + Sync, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
     // ptr: NodePtr<T, NODE_KIND>,
-    ptr: SwapArcIntermediatePtrGuard<'a, RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>, 2>,
+    ptr: SwapArcPtrGuard<'a, RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>, 2>,
 }
 
-impl<T, const NODE_KIND: NodeKind> LinkContent<'_, T, NODE_KIND> {
+impl<T: Send + Sync, const NODE_KIND: NodeKind> LinkContent<'_, T, NODE_KIND> {
     fn get_deletion_marker(&self) -> bool {
         (self.raw_ptr().expose_addr() & DELETION_MARKER) != 0
     }
@@ -1067,7 +1075,7 @@ impl<'a, T, const NODE_KIND: NodeKind> Drop for LinkContent<'a, T, NODE_KIND> {
     }
 }*/
 
-impl<T, const NODE_KIND: NodeKind> PartialEq for LinkContent<'_, T, NODE_KIND> {
+impl<T: Send + Sync, const NODE_KIND: NodeKind> PartialEq for LinkContent<'_, T, NODE_KIND> {
     fn eq(&self, other: &Self) -> bool {
         self.raw_ptr().expose_addr() == other.raw_ptr().expose_addr()
     }
@@ -1075,12 +1083,12 @@ impl<T, const NODE_KIND: NodeKind> PartialEq for LinkContent<'_, T, NODE_KIND> {
 
 // FIXME: always pass this around wrapped inside a guard!
 // #[derive(Copy, Clone, Debug)]
-struct FullLinkContent<T, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
+struct FullLinkContent<T: Send + Sync, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
     // ptr: NodePtr<T, NODE_KIND>,
-    ptr: SwapArcIntermediateFullPtrGuard<RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>, 2>,
+    ptr: SwapArcFullPtrGuard<RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>, 2>,
 }
 
-impl<T, const NODE_KIND: NodeKind> FullLinkContent<T, NODE_KIND> {
+impl<T: Send + Sync, const NODE_KIND: NodeKind> FullLinkContent<T, NODE_KIND> {
     fn get_deletion_marker(&self) -> bool {
         (self.raw_ptr().expose_addr() & DELETION_MARKER) != 0
     }
@@ -1125,13 +1133,13 @@ impl Metadata {
 
 }
 
-enum PtrGuardOrPtr<'a, T> {
-    Guard(SwapArcIntermediatePtrGuard<'a, T, Option<Arc<T>>, 2>),
-    FullGuard(SwapArcIntermediateFullPtrGuard<T, Option<Arc<T>>, 2>),
+enum PtrGuardOrPtr<'a, T: Send + Sync> {
+    Guard(SwapArcPtrGuard<'a, T, Option<Arc<T>>, 2>),
+    FullGuard(SwapArcFullPtrGuard<T, Option<Arc<T>>, 2>),
     Ptr(*const T),
 }
 
-impl<T> PtrGuardOrPtr<'_, T> {
+impl<T: Send + Sync> PtrGuardOrPtr<'_, T> {
 
     const META_MASK: usize = ((1 << 0) | (1 << 1));
 
@@ -1149,18 +1157,18 @@ impl<T> PtrGuardOrPtr<'_, T> {
 
 }
 
-unsafe fn release_ref<T, const NODE_KIND: NodeKind>(node_ptr: NodePtr<T, NODE_KIND>) {
+unsafe fn release_ref<T: Send + Sync, const NODE_KIND: NodeKind>(node_ptr: NodePtr<T, NODE_KIND>) {
     // decrement the reference count of the arc
     Arc::from_raw(node_ptr);
 }
 
-unsafe fn release_ref_2<T, const NODE_KIND: NodeKind>(node_ptr: NodePtr<T, NODE_KIND>, node_ptr_2: NodePtr<T, NODE_KIND>) {
+unsafe fn release_ref_2<T: Send + Sync, const NODE_KIND: NodeKind>(node_ptr: NodePtr<T, NODE_KIND>, node_ptr_2: NodePtr<T, NODE_KIND>) {
     // FIXME: is this the correct handling of release_ref with 2 params?
     // release_ref(node_ptr);
     // release_ref(node_ptr_2);
 }
 
-unsafe fn create_ref<T, const NODE_KIND: NodeKind>(node_ptr: NodePtr<T, NODE_KIND>) {
+unsafe fn create_ref<T: Send + Sync, const NODE_KIND: NodeKind>(node_ptr: NodePtr<T, NODE_KIND>) {
     let owned = Arc::from_raw(node_ptr);
     mem::forget(owned.clone());
     mem::forget(owned);
@@ -1341,857 +1349,3 @@ impl<T: OwnedDrop> From<T> for DropOwnedDeref<T> {
         DropOwnedDeref::new(val)
     }
 }*/
-
-/// A `SwapArc` is a data structure that allows for an `Arc`
-/// to be passed around and swapped out with other `Arc`s.
-/// In order to achieve this, an internal reference count
-/// scheme is used which allows for very quick, low overhead
-/// reads in the common case (no update) and will sill be
-/// decently fast when an update is performed, as updates
-/// only consist of 3 atomic instructions. When a new
-/// `Arc` is to be stored in the `SwapArc`, it first tries to
-/// immediately update the current pointer (the one all readers will see)
-/// (this is possible, if no other update is being performed and if there are no readers left)
-/// if this fails, it will `push` the update so that it will
-/// be performed by the last reader to finish reading.
-/// A read consists of loading the current pointer and
-/// performing a clone operation on the `Arc`, thus
-/// readers are very short-lived and shouldn't block
-/// updates for very long, although writer starvation
-/// is possible in theory, it probably won't every be
-/// observed in practice because of the short-lived
-/// nature of readers.
-pub struct SwapArc<T> {
-    ref_cnt: AtomicUsize, // the last bit is the `update` bit
-    ptr: AtomicPtr<T>,
-    updated: AtomicPtr<T>,
-}
-
-impl<T> SwapArc<T> {
-
-    const UPDATE: usize = 1 << (usize::BITS - 1);
-    const FORCE_UPDATE: usize = 1 << (usize::BITS - 1); // FIXME: do we actually need a separate flag? - we probably do
-    // FIXME: implement force updating!
-    pub fn load_full(&self) -> Arc<T> {
-        let mut ref_cnt = self.ref_cnt.fetch_add(1, Ordering::SeqCst);
-        // wait until the update finished
-        while ref_cnt & Self::UPDATE != 0 {
-            ref_cnt = self.ref_cnt.load(Ordering::SeqCst);
-        }
-        let tmp = unsafe { Arc::from_raw(self.ptr.load(Ordering::Acquire)) };
-        let ret = tmp.clone();
-        // create a `virtual reference` to the Arc to ensure it doesn't get dropped until we can allow it to be so
-        mem::forget(tmp);
-        let curr = self.ref_cnt.fetch_sub(1, Ordering::SeqCst);
-        // fast-rejection path to ensure we are only trying to update if it's worth it
-        if (curr == 0/* || curr == Self::UPDATE*/) && !self.updated.load(Ordering::SeqCst).is_null() {
-            self.try_update();
-        }
-        ret
-    }
-
-    fn try_update(&self) {
-        match self.ref_cnt.compare_exchange(0, Self::UPDATE, Ordering::SeqCst, Ordering::SeqCst) {
-            Ok(_)/* | Err(Self::UPDATE)*/ => {
-                // take the update
-                let update = self.updated.swap(null_mut(), Ordering::SeqCst);
-                // check if we even have an update
-                if !update.is_null() {
-                    // update the pointer
-                    let prev = self.ptr.swap(update, Ordering::Release);
-                    // unset the update flag
-                    self.ref_cnt.fetch_and(!Self::UPDATE, Ordering::SeqCst);
-                    // drop the `virtual reference` we hold to the Arc
-                    unsafe { Arc::from_raw(prev); }
-                } else {
-                    // unset the update flag
-                    self.ref_cnt.fetch_and(!Self::UPDATE, Ordering::SeqCst);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    pub fn update(&self, updated: Arc<T>) {
-        loop {
-            match self.ref_cnt.compare_exchange(0, Self::UPDATE, Ordering::SeqCst, Ordering::SeqCst) {
-                Ok(_) => {
-                    // clear out old updates to make sure our update won't be overwritten by them in the future
-                    self.updated.store(null_mut(), Ordering::SeqCst);
-                    let prev = self.ptr.swap(Arc::into_raw(updated).cast_mut(), Ordering::Release);
-                    // unset the update flag
-                    self.ref_cnt.fetch_and(!Self::UPDATE, Ordering::SeqCst);
-                    // drop the `virtual reference` we hold to the Arc
-                    unsafe { Arc::from_raw(prev); }
-                    break;
-                }
-                Err(old) => {
-                    if old & Self::UPDATE != 0 {
-                        // somebody else already updates the current ptr, so we wait until they finish their update
-                        continue;
-                    }
-                    // push our update up, so it will be applied in the future
-                    self.updated.store(Arc::into_raw(updated).cast_mut(), Ordering::SeqCst);
-                    break;
-                }
-            }
-        }
-    }
-
-    /// This will force an update, this means that new
-    /// readers will have to wait for all old readers to
-    /// finish and to update the ptr, even when no update
-    /// is queued this will block new readers for a short
-    /// amount of time, until failure got detected
-    fn dummy() {}
-    /*fn force_update(&self) -> UpdateResult {
-        let curr = self.ref_cnt.fetch_or(Self::FORCE_UPDATE, Ordering::SeqCst);
-        if curr & Self::UPDATE != 0 {
-            return UpdateResult::AlreadyUpdating;
-        }
-        if self.updated.load(Ordering::SeqCst).is_null() {
-            // unset the flag, as there are no upcoming updates
-            self.ref_cnt.fetch_and(!Self::UPDATE, Ordering::SeqCst);
-            return UpdateResult::NoUpdate;
-        }
-        UpdateResult::Ok
-    }*/
-
-}
-
-#[derive(Copy, Clone, Debug)]
-pub enum UpdateResult {
-    Ok,
-    AlreadyUpdating,
-    NoUpdate,
-}
-
-
-/// A `SwapArc` is a data structure that allows for an `Arc`
-/// to be passed around and swapped out with other `Arc`s.
-/// In order to achieve this, an internal reference count
-/// scheme is used which allows for very quick, low overhead
-/// reads in the common case (no update) and will sill be
-/// decently fast when an update is performed, as updates
-/// only consist of 3 atomic instructions. When a new
-/// `Arc` is to be stored in the `SwapArc`, it first tries to
-/// immediately update the current pointer (the one all readers will see)
-/// (this is possible, if no other update is being performed and if there are no readers left)
-/// if this fails, it will `push` the update so that it will
-/// be performed by the last reader to finish reading.
-/// A read consists of loading the current pointer and
-/// performing a clone operation on the `Arc`, thus
-/// readers are very short-lived and shouldn't block
-/// updates for very long, although writer starvation
-/// is possible in theory, it probably won't every be
-/// observed in practice because of the short-lived
-/// nature of readers.
-
-/// This variant of `SwapArc` has wait-free reads (although
-/// this is at the cost of additional atomic instructions
-/// (at most 2 additional updates).
-pub struct SwapArcIntermediate<T, D: DataPtrConvert<T> + RefCnt = Arc<T>, const METADATA_HEADER_BITS: u32 = 0> {
-    curr_ref_cnt: AtomicUsize, // the last bit is the `update` bit
-    ptr: AtomicPtr<T>,
-    intermediate_ref_cnt: AtomicUsize, // the last bit is the `update` bit
-    intermediate_ptr: AtomicPtr<T>,
-    updated: AtomicPtr<T>,
-    _phantom_data: PhantomData<D>,
-}
-
-impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> SwapArcIntermediate<T, D, METADATA_PREFIX_BITS> {
-
-    const UPDATE: usize = 1 << (usize::BITS - 1);
-    // const FORCE_UPDATE: usize = 1 << (usize::BITS - 2); // FIXME: do we actually need a separate flag? - we probably do
-                                                           // FIXME: implement force updating!
-    const OTHER_UPDATE: usize = 1 << (usize::BITS - 2);
-
-    pub fn new(val: D) -> Arc<Self> {
-        val.increase_ref_cnt();
-        let virtual_ref = val.into();
-        Arc::new(Self {
-            curr_ref_cnt: Default::default(),
-            ptr: AtomicPtr::new(virtual_ref.cast_mut()),
-            intermediate_ref_cnt: Default::default(),
-            intermediate_ptr: AtomicPtr::new(null_mut()),
-            updated: AtomicPtr::new(null_mut()),
-            _phantom_data: Default::default(),
-        })
-    }
-
-    /// SAFETY: this is only safe to call if the caller increments the
-    /// reference count of the "object" `val` points to.
-    unsafe fn new_raw(val: *const T) -> Arc<Self> {
-        Arc::new(Self {
-            curr_ref_cnt: Default::default(),
-            ptr: AtomicPtr::new(val.cast_mut()),
-            intermediate_ref_cnt: Default::default(),
-            intermediate_ptr: AtomicPtr::new(null_mut()),
-            updated: AtomicPtr::new(null_mut()),
-            _phantom_data: Default::default(),
-        })
-    }
-
-    pub fn load<'a>(self: &'a Arc<Self>) -> SwapArcIntermediateGuard<'a, T, D, METADATA_PREFIX_BITS> {
-        let ref_cnt = self.curr_ref_cnt.fetch_add(1, Ordering::SeqCst);
-        let (ptr, src) = if ref_cnt & Self::UPDATE != 0 {
-            let intermediate_ref_cnt = self.intermediate_ref_cnt.fetch_add(1, Ordering::SeqCst);
-            if intermediate_ref_cnt & Self::UPDATE != 0 {
-                let ret = self.ptr.load(Ordering::Acquire);
-                // release the redundant reference
-                self.intermediate_ref_cnt.fetch_sub(1, Ordering::SeqCst);
-                (ret, RefSource::Curr)
-            } else {
-                let ret = self.intermediate_ptr.load(Ordering::Acquire);
-                // release the redundant reference
-                self.curr_ref_cnt.fetch_sub(1, Ordering::SeqCst);
-                (ret, RefSource::Intermediate)
-            }
-        } else {
-            (self.ptr.load(Ordering::Acquire), RefSource::Curr)
-        };
-        // create a fake reference to the Arc to ensure so that the borrow checker understands
-        // that the reference returned from the guard will point to valid memory
-        let fake_ref = ManuallyDrop::new(D::from(Self::strip_metadata(ptr)));
-        SwapArcIntermediateGuard {
-            parent: self,
-            fake_ref,
-            ref_src: src,
-        }
-    }
-
-    pub fn load_full(self: &Arc<Self>) -> D {
-        self.load().as_ref().clone()
-    }
-
-    unsafe fn load_raw<'a>(self: &Arc<Self>) -> SwapArcIntermediatePtrGuard<'a, T, D, METADATA_PREFIX_BITS> {
-        let ref_cnt = self.curr_ref_cnt.fetch_add(1, Ordering::SeqCst);
-        println!("ref_cnt start: {}", ref_cnt);
-        let (ptr, src) = if ref_cnt & Self::UPDATE != 0 {
-            let intermediate_ref_cnt = self.intermediate_ref_cnt.fetch_add(1, Ordering::SeqCst);
-            if intermediate_ref_cnt & Self::UPDATE != 0 {
-                let ret = Self::strip_metadata(self.ptr.load(Ordering::Acquire));
-                let meta = Self::get_metadata(self.intermediate_ptr.load(Ordering::Acquire));
-                let ret = Self::merge_ptr_and_metadata(ret, meta);
-                // release the redundant reference
-                self.intermediate_ref_cnt.fetch_sub(1, Ordering::SeqCst);
-                (ret, RefSource::Curr)
-            } else {
-                let ret = self.intermediate_ptr.load(Ordering::Acquire);
-                // release the redundant reference
-                self.curr_ref_cnt.fetch_sub(1, Ordering::SeqCst);
-                (ret.cast_const(), RefSource::Intermediate)
-            }
-        } else {
-            let ret = Self::strip_metadata(self.ptr.load(Ordering::Acquire)); // FIXME: the error always happens either here
-            let meta = Self::get_metadata(self.intermediate_ptr.load(Ordering::Acquire)); // FIXME: or here!
-            let ret = Self::merge_ptr_and_metadata(ret, meta);
-            (ret, RefSource::Curr)
-        };
-        SwapArcIntermediatePtrGuard {
-            parent: self.clone(),
-            ptr,
-            ref_src: src,
-            _phantom_data: Default::default()
-        }
-    }
-
-    pub fn load_raw_full(self: &Arc<Self>) -> SwapArcIntermediateFullPtrGuard<T, D, METADATA_PREFIX_BITS> {
-        let _full = unsafe { self.load_raw() };
-        let ptr = _full.as_raw();
-        println!("generating full!!");
-        let full = D::from(Self::strip_metadata(ptr));
-        // increase ref cnt to account for reference that is created out of thin air
-        full.increase_ref_cnt();
-        drop(_full);
-        SwapArcIntermediateFullPtrGuard {
-            parent: full,
-            ptr,
-        }
-    }
-
-    fn try_update_curr(&self) -> bool { // FIXME: this is very probably the cause of the issues! (29.10.22 | 20:25) - after testing it probably isn't!
-        // println!("try update curr!");
-        // false
-        /*match self.curr_ref_cnt.compare_exchange(0, Self::UPDATE, Ordering::SeqCst, Ordering::SeqCst) {
-            Ok(_) => {
-                println!("update curr!!");
-                // FIXME: can we somehow bypass intermediate if we have a new update upcoming - we probably can't because this would probably cause memory leaks and other funny things that we don't like
-                let intermediate = self.intermediate_ptr.load(Ordering::SeqCst);
-                // update the pointer
-                let prev = self.ptr.load(Ordering::Acquire);
-                if Self::strip_metadata(prev) != Self::strip_metadata(intermediate) {
-                    println!("perform update!");
-                    self.ptr.store(intermediate, Ordering::Release);
-                    // unset the update flag
-                    self.curr_ref_cnt.fetch_and(!Self::UPDATE, Ordering::SeqCst);
-                    println!("UPDATE status: {}", (self.intermediate_ref_cnt.load(Ordering::SeqCst) & Self::UPDATE != 0));
-                    let interm_ref_cnt = self.intermediate_ref_cnt.load(Ordering::SeqCst);
-                    if (interm_ref_cnt & Self::OTHER_UPDATE) != 0 && (interm_ref_cnt & Self::UPDATE) == 0 {
-                        // unset the `weak` update flag from the intermediate ref cnt
-                        self.intermediate_ref_cnt.fetch_and(!Self::OTHER_UPDATE, Ordering::SeqCst); // FIXME: are we sure this can't happen if there is UPDATE set for intermediate_ref?
-                    } else {
-                        println!("ENCOUNTERED WEIRD STATE!");
-                    }
-                    // drop the `virtual reference` we hold to the Arc
-                    D::from(Self::strip_metadata(prev));
-                } else {
-                    println!("DONT perform update!");
-                    // unset the update flag
-                    self.curr_ref_cnt.fetch_and(!Self::UPDATE, Ordering::SeqCst);
-                }
-                true
-            }
-            _ => false,
-        }*/
-        false
-    }
-
-    fn try_update_intermediate(&self) {
-        /*match self.intermediate_ref_cnt.compare_exchange(0, Self::UPDATE | Self::OTHER_UPDATE, Ordering::SeqCst, Ordering::SeqCst) {
-            Ok(_) => {
-                // take the update
-                let update = self.updated.swap(null_mut(), Ordering::SeqCst);
-                // check if we even have an update
-                if !update.is_null() {
-                    let metadata = Self::get_metadata(self.intermediate_ptr.load(Ordering::Acquire));
-                    let update = Self::merge_ptr_and_metadata(update, metadata).cast_mut();
-                    self.intermediate_ptr.store(update, Ordering::Release);
-                    // unset the update flag
-                    self.intermediate_ref_cnt.fetch_and(!Self::UPDATE, Ordering::SeqCst);
-                    // try finishing the update up!
-                    match self.curr_ref_cnt.compare_exchange(0, Self::UPDATE, Ordering::SeqCst, Ordering::SeqCst) {
-                        Ok(_) => {
-                            let prev = self.ptr.swap(update, Ordering::Release);
-                            if Self::strip_metadata(prev) == Self::strip_metadata(update) {
-                                println!("ENCOUNTERED WEIRD STATE 2");
-                            }
-                            // unset the update flag
-                            self.curr_ref_cnt.fetch_and(!Self::UPDATE, Ordering::SeqCst);
-                            // unset the `weak` update flag from the intermediate ref cnt
-                            self.intermediate_ref_cnt.fetch_and(!Self::OTHER_UPDATE, Ordering::SeqCst);
-                            // drop the `virtual reference` we hold to the Arc
-                            D::from(Self::strip_metadata(prev));
-                        }
-                        Err(_) => {}
-                    }
-                } else {
-                    // unset the update flags
-                    self.intermediate_ref_cnt.fetch_and(!(Self::UPDATE | Self::OTHER_UPDATE), Ordering::SeqCst);
-                }
-            }
-            Err(_) => {}
-        }*/
-    }
-
-    pub fn update(&self, updated: D) {
-        // unsafe { self.update_raw(updated.into()); }
-    }
-
-    unsafe fn update_raw(&self, updated: *const T) {
-        let updated = Self::strip_metadata(updated);
-        loop {
-            match self.intermediate_ref_cnt.compare_exchange(0, Self::UPDATE | Self::OTHER_UPDATE, Ordering::SeqCst, Ordering::SeqCst) {
-                Ok(_) => {
-                    // leak a reference
-                    let tmp = D::from(updated);
-                    tmp.increase_ref_cnt();
-                    mem::forget(tmp);
-                    let new = updated.cast_mut();
-                    // clear out old updates to make sure our update won't be overwritten by them in the future
-                    let old = self.updated.swap(null_mut(), Ordering::SeqCst);
-                    let metadata = Self::get_metadata(self.intermediate_ptr.load(Ordering::Acquire));
-                    let new = Self::merge_ptr_and_metadata(new, metadata).cast_mut();
-                    self.intermediate_ptr.store(new, Ordering::Release);
-                    // unset the update flag
-                    self.intermediate_ref_cnt.fetch_and(!Self::UPDATE, Ordering::SeqCst);
-                    if !old.is_null() {
-                        // drop the `virtual reference` we hold to the Arc
-                        D::from(old);
-                    }
-                    // try finishing the update up!
-                    match self.curr_ref_cnt.compare_exchange(0, Self::UPDATE, Ordering::SeqCst, Ordering::SeqCst) {
-                        Ok(_) => {
-                            let prev = self.ptr.swap(new, Ordering::Release);
-                            // unset the update flag
-                            self.curr_ref_cnt.fetch_and(!Self::UPDATE, Ordering::SeqCst);
-                            // unset the `weak` update flag from the intermediate ref cnt
-                            self.intermediate_ref_cnt.fetch_and(!Self::OTHER_UPDATE, Ordering::SeqCst);
-                            // drop the `virtual reference` we hold to the Arc
-                            D::from(Self::strip_metadata(prev));
-                        }
-                        Err(_) => {}
-                    }
-                    break;
-                }
-                Err(old) => {
-                    if old & Self::UPDATE != 0 { // FIXME: what about Self::UPDATE_OTHER?
-                        // somebody else already updates the current ptr, so we wait until they finish their update
-                        continue;
-                    }
-                    // leak a reference
-                    let tmp = D::from(updated);
-                    tmp.increase_ref_cnt();
-                    mem::forget(tmp);
-                    // push our update up, so it will be applied in the future
-                    let old = self.updated.swap(updated.cast_mut(), Ordering::SeqCst); // FIXME: should we add some sort of update counter
-                                                                                                        // FIXME: to determine which update is the most recent?
-                    if !old.is_null() {
-                        // drop the `virtual reference` we hold to the Arc
-                        D::from(old);
-                    }
-                    break;
-                }
-            }
-        }
-    }
-
-    unsafe fn try_compare_exchange<const IGNORE_META: bool>(&self, old: *const T, new: D/*&SwapArcIntermediateGuard<'_, T, D>*/) -> bool {
-        /*if !self.intermediate_ref_cnt.compare_exchange(0, Self::UPDATE | Self::OTHER_UPDATE, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-            return false;
-        }
-        let intermediate = self.intermediate_ptr.load(Ordering::Acquire);
-        let cmp_result = if IGNORE_META {
-            Self::strip_metadata(intermediate) == old
-        } else {
-            intermediate.cast_const() == old
-        };
-        if !cmp_result {
-            self.intermediate_ref_cnt.fetch_and(!(Self::UPDATE | Self::OTHER_UPDATE), Ordering::SeqCst);
-            return false;
-        }
-        // leak a reference
-        let new = ManuallyDrop::new(new);
-        let new = D::as_ptr(&new);
-        // clear out old updates to make sure our update won't be overwritten by them in the future
-        let old_update = self.updated.swap(null_mut(), Ordering::SeqCst);
-        let metadata = Self::get_metadata(intermediate);
-        let new = Self::merge_ptr_and_metadata(new, metadata).cast_mut();
-        self.intermediate_ptr.store(new, Ordering::Release);
-        // unset the update flag
-        self.intermediate_ref_cnt.fetch_and(!Self::UPDATE, Ordering::SeqCst);
-        if !old_update.is_null() {
-            // drop the `virtual reference` we hold to the Arc
-            D::from(old_update);
-        }
-        match self.curr_ref_cnt.compare_exchange(0, Self::UPDATE, Ordering::SeqCst, Ordering::SeqCst) {
-            Ok(_) => {
-                let prev = self.ptr.swap(new, Ordering::Release);
-                // unset the update flag
-                self.curr_ref_cnt.fetch_and(!Self::UPDATE, Ordering::SeqCst);
-                // unset the `weak` update flag from the intermediate ref cnt
-                self.intermediate_ref_cnt.fetch_and(!Self::OTHER_UPDATE, Ordering::SeqCst);
-                // drop the `virtual reference` we hold to the Arc
-                D::from(Self::strip_metadata(prev));
-            }
-            Err(_) => {}
-        }*/
-        true
-    }
-
-    // FIXME: this causes "deadlocks" if there are any other references alive - THIS HUGE PROBLEM HAS A POTENTIAL SOLUTION:
-    // FIXME: this solution has a big disadvantage: it potentially requires 1 allocation per compare_exchange
-    // FIXME: it looks like this: we have a linked list of "old" intermediate values and an "old value counter"
-    // FIXME: and all ref count decrements of guards will have to check their pointer and the pointer stored inside
-    // FIXME: the current `intermediate` or `curr` atomic ptrs - FIXME: this can lead to a race condition, how could we fix that? - we could introduce an additional counter to avoid said race condition - are there other ways?
-    // FIXME: and when the "old value counter" reaches 0, all old values will be released, we could also store all old values inside a Mutex<Vec<D>>>
-    // FIXME: but all of this isn't very performant, a better solution would be very nice!
-    // FIXME: a better solution to this are strong - or (probably) even better, semi-strong loads
-    // FIXME: i.e. loads which can outlive the SwapArc itself and doesn't hinder updates once created
-    unsafe fn try_compare_exchange_with_meta(&self, old: *const T, new: *const T/*&SwapArcIntermediateGuard<'_, T, D>*/) -> bool {
-        /*println!("called cmp exchg!");
-        let tmp = self.intermediate_ref_cnt.compare_exchange(0, Self::UPDATE | Self::OTHER_UPDATE, Ordering::SeqCst, Ordering::SeqCst);
-        if !tmp.is_ok() {
-            match tmp {
-                Ok(_) => {}
-                Err(err) => {
-                    println!("already updating: {}", err);
-                    println!("UPDATE status: {}", (err & Self::UPDATE != 0));
-                    println!("OTHER_UPDATE status: {}", (err & Self::OTHER_UPDATE != 0));
-                }
-            }
-            return false;
-        }
-        let intermediate = self.intermediate_ptr.load(Ordering::Acquire);
-        if intermediate.cast_const() != old {
-            self.intermediate_ref_cnt.fetch_and(!(Self::UPDATE | Self::OTHER_UPDATE), Ordering::SeqCst);
-            println!("cmp exchg failed: curr {:?} expected {:?}", intermediate, old);
-            return false;
-        }
-        // clear out old updates to make sure our update won't be overwritten by them in the future
-        let old_update = self.updated.swap(null_mut(), Ordering::SeqCst);
-        // increase the ref count
-        let tmp = D::from(Self::strip_metadata(new));
-        mem::forget(tmp.clone());
-        mem::forget(tmp);
-        self.intermediate_ptr.store(new.cast_mut(), Ordering::Release);
-        // unset the update flag
-        self.intermediate_ref_cnt.fetch_and(!Self::UPDATE, Ordering::SeqCst);
-        if !old_update.is_null() {
-            // drop the `virtual reference` we hold to the Arc
-            D::from(old_update);
-        }
-        match self.curr_ref_cnt.compare_exchange(0, Self::UPDATE, Ordering::SeqCst, Ordering::SeqCst) {
-            Ok(_) => {
-                let prev = self.ptr.swap(new.cast_mut(), Ordering::Release);
-                // unset the update flag
-                self.curr_ref_cnt.fetch_and(!Self::UPDATE, Ordering::SeqCst);
-                // unset the `weak` update flag from the intermediate ref cnt
-                self.intermediate_ref_cnt.fetch_and(!Self::OTHER_UPDATE, Ordering::SeqCst);
-                // drop the `virtual reference` we hold to the Arc
-                D::from(Self::strip_metadata(prev));
-            }
-            Err(_) => {}
-        }*/
-        true
-    }
-
-    pub fn update_metadata(&self, metadata: usize) {
-        /*loop {
-            let curr = self.intermediate_ptr.load(Ordering::Acquire);
-            if self.try_update_meta(curr, metadata) { // FIXME: should this be a weak compare_exchange?
-                break;
-            }
-        }*/
-    }
-
-    /// `old` should contain the previous metadata.
-    pub fn try_update_meta(&self, old: *const T, metadata: usize) -> bool {
-        let prefix = metadata & Self::META_MASK;
-        // self.intermediate_ptr.compare_exchange(old.cast_mut(), ptr::from_exposed_addr_mut(old.expose_addr() | prefix), Ordering::SeqCst, Ordering::SeqCst).is_ok()
-        true
-    }
-
-    pub fn set_in_metadata(&self, active_bits: usize) {
-        // self.intermediate_ptr.fetch_or(active_bits, Ordering::Release);
-    }
-
-    pub fn unset_in_metadata(&self, inactive_bits: usize) {
-        // self.intermediate_ptr.fetch_and(!inactive_bits, Ordering::Release);
-    }
-
-    pub fn load_metadata(&self) -> usize {
-        self.intermediate_ptr.load(Ordering::Acquire).expose_addr() & Self::META_MASK
-    }
-
-    fn get_metadata(ptr: *const T) -> usize {
-        ptr.expose_addr() & Self::META_MASK
-    }
-
-    fn strip_metadata(ptr: *const T) -> *const T {
-        ptr::from_exposed_addr(ptr.expose_addr() & !Self::META_MASK)
-    }
-
-    fn merge_ptr_and_metadata(ptr: *const T, metadata: usize) -> *const T {
-        ptr::from_exposed_addr(ptr/*Self::strip_metadata(ptr)*/.expose_addr() | metadata)
-    }
-
-    const META_MASK: usize = {
-        let mut result = 0;
-        let mut i = 0;
-        while METADATA_PREFIX_BITS > i {
-            result |= 1 << i;
-            i += 1;
-        }
-        result
-    };
-
-    /// This will force an update, this means that new
-    /// readers will have to wait for all old readers to
-    /// finish and to update the ptr, even when no update
-    /// is queued this will block new readers for a short
-    /// amount of time, until failure got detected
-    fn dummy() {}
-    /*fn force_update(&self) -> UpdateResult {
-        let curr = self.ref_cnt.fetch_or(Self::FORCE_UPDATE, Ordering::SeqCst);
-        if curr & Self::UPDATE != 0 {
-            return UpdateResult::AlreadyUpdating;
-        }
-        if self.updated.load(Ordering::SeqCst).is_null() {
-            // unset the flag, as there are no upcoming updates
-            self.ref_cnt.fetch_and(!Self::UPDATE, Ordering::SeqCst);
-            return UpdateResult::NoUpdate;
-        }
-        UpdateResult::Ok
-    }*/
-
-}
-
-impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> Drop for SwapArcIntermediate<T, D, METADATA_PREFIX_BITS> {
-    fn drop(&mut self) {
-        println!("DROPPING SWAP ARC!!!");
-        // FIXME: how should we handle intermediate inside drop?
-        let updated = self.updated.load(Ordering::Acquire);
-        if !updated.is_null() {
-            D::from(updated);
-        }
-        let curr = Self::strip_metadata(self.ptr.load(Ordering::Acquire));
-        let intermediate = Self::strip_metadata(self.intermediate_ptr.load(Ordering::Acquire));
-        if intermediate != curr {
-            // FIXME: the reason why we have to do this currently is because the update function doesn't work properly, fix the root cause!
-            D::from(intermediate);
-        }
-        // drop the current arc
-        D::from(curr);
-    }
-}
-
-pub struct SwapArcIntermediateGuard<'a, T, D: DataPtrConvert<T> + RefCnt = Arc<T>, const METADATA_PREFIX_BITS: u32 = 0> {
-    parent: &'a Arc<SwapArcIntermediate<T, D, METADATA_PREFIX_BITS>>,
-    fake_ref: ManuallyDrop<D>,
-    ref_src: RefSource,
-}
-
-impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> Drop for SwapArcIntermediateGuard<'_, T, D, METADATA_PREFIX_BITS> {
-    fn drop(&mut self) {
-        println!("guard drop!");
-        // release the reference we hold
-        match self.ref_src {
-            RefSource::Curr => {
-                // let ref_cnt = self.parent.curr_ref_cnt.load(Ordering::SeqCst);
-                let ref_cnt = self.parent.curr_ref_cnt.fetch_sub(1, Ordering::SeqCst);
-                if ref_cnt == 1 {
-                    self.parent.try_update_curr();
-                }
-                // self.parent.curr_ref_cnt.fetch_sub(1, Ordering::SeqCst);
-            }
-            RefSource::Intermediate => {
-                // FIXME: do we actually have to load the ref cnt before subtracting 1 from it?
-                // let ref_cnt = self.parent.intermediate_ref_cnt.load(Ordering::SeqCst);
-                let ref_cnt = self.parent.intermediate_ref_cnt.fetch_sub(1, Ordering::SeqCst);
-                // fast-rejection path to ensure we are only trying to update if it's worth it
-                // FIXME: this probably isn't correct: Note: UPDATE is set (seldom) on the immediate ref_cnt if there is a forced update waiting in the queue
-                if (ref_cnt == 1/* || ref_cnt == SwapArcIntermediate::<T>::UPDATE*/) && !self.parent.updated.load(Ordering::Acquire).is_null() { // FIXME: does the updated check even help here?
-                    self.parent.try_update_intermediate();
-                }
-                // self.parent.intermediate_ref_cnt.fetch_sub(1, Ordering::SeqCst);
-            }
-        }
-    }
-}
-
-impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> Deref for SwapArcIntermediateGuard<'_, T, D, METADATA_PREFIX_BITS> {
-    type Target = D;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        self.fake_ref.deref()
-    }
-}
-
-impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> Borrow<D> for SwapArcIntermediateGuard<'_, T, D, METADATA_PREFIX_BITS> {
-    #[inline]
-    fn borrow(&self) -> &D {
-        self.fake_ref.deref()
-    }
-}
-
-impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> AsRef<D> for SwapArcIntermediateGuard<'_, T, D, METADATA_PREFIX_BITS> {
-    #[inline]
-    fn as_ref(&self) -> &D {
-        self.fake_ref.deref()
-    }
-}
-
-impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> Clone for SwapArcIntermediateGuard<'_, T, D, METADATA_PREFIX_BITS> {
-    fn clone(&self) -> Self {
-        self.parent.load()
-    }
-}
-
-impl<T, D: DataPtrConvert<T> + RefCnt + Display, const METADATA_PREFIX_BITS: u32> Display for SwapArcIntermediateGuard<'_, T, D, METADATA_PREFIX_BITS> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        D::fmt(self.as_ref(), f)
-    }
-}
-
-impl<T, D: DataPtrConvert<T> + RefCnt + Debug, const METADATA_PREFIX_BITS: u32> Debug for SwapArcIntermediateGuard<'_, T, D, METADATA_PREFIX_BITS> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        D::fmt(self.as_ref(), f)
-    }
-}
-
-pub struct SwapArcIntermediatePtrGuard<'a, T, D: DataPtrConvert<T> + RefCnt = Arc<T>, const METADATA_PREFIX_BITS: u32 = 0> {
-    parent: Arc<SwapArcIntermediate<T, D, METADATA_PREFIX_BITS>>,
-    ptr: *const T,
-    ref_src: RefSource,
-    _phantom_data: PhantomData<&'a ()>,
-}
-
-impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> SwapArcIntermediatePtrGuard<'_, T, D, METADATA_PREFIX_BITS> {
-
-    #[inline]
-    pub fn as_raw(&self) -> *const T {
-        self.ptr
-    }
-
-}
-
-impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> Clone for SwapArcIntermediatePtrGuard<'_, T, D, METADATA_PREFIX_BITS> {
-    fn clone(&self) -> Self {
-        // unsafe { self.parent.load_raw() }
-        todo!()
-    }
-}
-
-impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> Drop for SwapArcIntermediatePtrGuard<'_, T, D, METADATA_PREFIX_BITS> {
-    fn drop(&mut self) {
-        println!("dropped!!!");
-        // release the reference we hold
-        match self.ref_src {
-            RefSource::Curr => {
-                // let ref_cnt = self.parent.curr_ref_cnt.load(Ordering::SeqCst);
-                let ref_cnt = self.parent.curr_ref_cnt.fetch_sub(1, Ordering::SeqCst); // FIXME: here is a use-after-free! (on self.parent)
-                if ref_cnt == 1 {
-                    self.parent.try_update_curr(); // FIXME: this call is responsible for the UB - even if it does nothing except print a message
-                }
-                println!("ref cnt end: {}", (ref_cnt - 1));
-                // self.parent.curr_ref_cnt.fetch_sub(1, Ordering::SeqCst);
-            }
-            RefSource::Intermediate => {
-                // let ref_cnt = self.parent.intermediate_ref_cnt.load(Ordering::SeqCst);
-                let ref_cnt = self.parent.intermediate_ref_cnt.fetch_sub(1, Ordering::SeqCst);
-                // fast-rejection path to ensure we are only trying to update if it's worth it
-                // FIXME: this probably isn't correct: Note: UPDATE is set (seldom) on the immediate ref_cnt if there is a forced update waiting in the queue
-                if (ref_cnt == 1/* || ref_cnt == SwapArcIntermediate::<T>::UPDATE*/) && !self.parent.updated.load(Ordering::Acquire).is_null() { // FIXME: does the updated check even help here?
-                    self.parent.try_update_intermediate();
-                }
-                println!("ref cnt end: {}", (ref_cnt - 1));
-                // self.parent.intermediate_ref_cnt.fetch_sub(1, Ordering::SeqCst);
-            }
-        }
-    }
-}
-
-impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> Debug for SwapArcIntermediatePtrGuard<'_, T, D, METADATA_PREFIX_BITS> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let tmp = format!("{:?}", self.ptr);
-        f.write_str(tmp.as_str())
-    }
-}
-
-
-pub struct SwapArcIntermediateFullPtrGuard<T, D: DataPtrConvert<T> + RefCnt = Arc<T>, const METADATA_PREFIX_BITS: u32 = 0> {
-    parent: D,
-    ptr: *const T,
-}
-
-impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> SwapArcIntermediateFullPtrGuard<T, D, METADATA_PREFIX_BITS> {
-
-    #[inline]
-    pub fn as_raw(&self) -> *const T {
-        self.ptr
-    }
-
-}
-
-impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> Clone for SwapArcIntermediateFullPtrGuard<T, D, METADATA_PREFIX_BITS> {
-    fn clone(&self) -> Self {
-        SwapArcIntermediateFullPtrGuard {
-            parent: self.parent.clone(),
-            ptr: self.ptr,
-        }
-    }
-}
-
-impl<T, D: DataPtrConvert<T> + RefCnt, const METADATA_PREFIX_BITS: u32> Debug for SwapArcIntermediateFullPtrGuard<T, D, METADATA_PREFIX_BITS> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let tmp = format!("{:?}", self.ptr);
-        f.write_str(tmp.as_str())
-    }
-}
-
-enum RefSource {
-    Curr,
-    Intermediate,
-}
-
-/// SAFETY: Types implementing this trait are expected to perform
-/// reference counting through cloning/dropping internally.
-pub unsafe trait RefCnt: Clone {}
-
-pub trait DataPtrConvert<T>: RefCnt + Sized {
-
-    const INVALID: *const T;
-
-    /// This function may not alter the reference count of the
-    /// reference counted "object".
-    fn from(ptr: *const T) -> Self;
-
-    /// This function should decrement the reference count of the
-    /// reference counted "object" indirectly, by automatically
-    /// decrementing it on drop inside the "object"'s drop
-    /// implementation.
-    fn into(self) -> *const T;
-
-    /// This function should NOT decrement the reference count of the
-    /// reference counted "object" in any way, shape or form.
-    fn as_ptr(&self) -> *const T;
-
-    /// This function should increment the reference count of the
-    /// reference counted "object" directly.
-    fn increase_ref_cnt(&self);
-
-}
-
-unsafe impl<T> RefCnt for Arc<T> {}
-
-impl<T> DataPtrConvert<T> for Arc<T> {
-    const INVALID: *const T = null();
-
-    fn from(ptr: *const T) -> Self {
-        unsafe { Arc::from_raw(ptr) }
-    }
-
-    fn into(self) -> *const T {
-        let ret = Arc::into_raw(self);
-        // decrement the reference count
-        <Self as DataPtrConvert<T>>::from(ret);
-        ret
-    }
-
-    fn as_ptr(&self) -> *const T {
-        Arc::as_ptr(self)
-    }
-
-    fn increase_ref_cnt(&self) {
-        mem::forget(self.clone());
-    }
-}
-
-unsafe impl<T> RefCnt for Option<Arc<T>> {}
-
-impl<T> DataPtrConvert<T> for Option<Arc<T>> {
-    const INVALID: *const T = null();
-
-    fn from(ptr: *const T) -> Self {
-        if !ptr.is_null() {
-            Some(unsafe { Arc::from_raw(ptr) })
-        } else {
-            None
-        }
-    }
-
-    fn into(self) -> *const T {
-        match self {
-            None => null(),
-            Some(val) => {
-                let ret = Arc::into_raw(val);
-                // decrement the reference count
-                <Self as DataPtrConvert<T>>::from(ret);
-                ret
-            },
-        }
-    }
-
-    fn as_ptr(&self) -> *const T {
-        match self {
-            None => null(),
-            Some(val) => Arc::as_ptr(val),
-        }
-    }
-
-    fn increase_ref_cnt(&self) {
-        mem::forget(self.clone());
-    }
-}

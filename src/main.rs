@@ -21,7 +21,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 use rand::{Rng, thread_rng};
 use serde::{Deserialize, Serialize};
-use crate::doubly_linked_list::{AtomicDoublyLinkedList, NodeKind, SwapArcIntermediate};
+use crate::doubly_linked_list::{AtomicDoublyLinkedList, NodeKind};
 use crate::linked_list::LinkedList;
 use crate::rustlings::test_main;
 

@@ -432,7 +432,7 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NO
         let tmp_right = ManuallyDrop::new(unsafe { Arc::from_raw(tmp.get_ptr()) });
         // let tmp_left = ManuallyDrop::new(unsafe { Arc::from_raw(self.left.get().get_ptr().as_ref().unwrap()) });
         println!("PRE right arc refs: {}", Arc::strong_count(&tmp_right));*/
-        // let this = Arc::as_ptr(self);
+        let this = Arc::as_ptr(self);
         if self.right./*get_full()*/get().raw_ptr().is_null() {
             println!("adding beffffore!");
             // if we are the tail, add before ourselves, not after
@@ -457,17 +457,17 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NO
                 // increase the ref count by 1
                 // mem::forget(self.clone());
                 // create_ref(this);
-                // node.left.set_unsafe/*::<false>*/(this);
+                node.left.set_unsafe/*::<false>*/(this);
             }
             unsafe {
                 // create_ref(next.get_ptr()); // store_ref(node.right, <next, false>) | in iter 1: tail refs += 1
 
                 // increase the ref count by 1
                 // create_ref(next.get_ptr());
-                // node.right.set_unsafe/*::<false>*/(next.get_ptr());
+                node.right.set_unsafe/*::<false>*/(next.get_ptr());
             }
 
-            /*println!("set meta!");
+            println!("set meta!");
             if self
                 .right
                 .try_set_addr_full_with_meta(next.get_ptr(), Arc::as_ptr(node))
@@ -476,14 +476,14 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NO
                 // SAFETY: we have to create a reference to node in order ensure, that it is always valid, when it has to be
                 // unsafe { create_ref(Arc::as_ptr(node)); }
                 break;
-            }*/
+            }
             // unsafe { release_ref(next.get_ptr()); } // in iter 1: tail refs -= 1
-            /*if self.right.get_meta().get_deletion_marker() { // FIXME: err when using get() instead of get_meta()
+            if self.right.get_meta().get_deletion_marker() { // FIXME: err when using get() instead of get_meta()
                 // release_ref(node); // this is probably unnecessary, as we don't delete the node, but reuse it
                 // delete_node(node);
                 println!("adding beffffore!");
                 return self.inner_add_before(node);
-            }*/
+            }
             // back-off
             thread::sleep(Duration::from_micros(10 * back_off_weight));
             back_off_weight += 1;
@@ -801,10 +801,17 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind, const DELETED: bool> Drop
 const DELETION_MARKER: usize = 1 << 1/*63*/;
 const DETACHED_MARKER: usize = 1 << 0/*62*/; // FIXME: can we replace this marker with nulling pointers?
 
+#[repr(transparent)]
+struct ForcedSendSync<T>(T);
+
+unsafe impl<T> Send for ForcedSendSync<T> {}
+unsafe impl<T> Sync for ForcedSendSync<T> {}
+
 // #[derive(Debug)]
 struct Link<T: Send + Sync, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
     // ptr: Aligned<A4, AtomicPtr<RawNode<T, NODE_KIND>>>,
-    ptr: Aligned<A4, Arc<SwapArcAnyMeta<(), Option<Arc<()>>, 0>>/*Arc<SwapArcAnyMeta<RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>/*Option<Arc<RawNode<T, NODE_KIND>>>*/, 2>>*/>,
+    // Aligned<A4, Arc<SwapArcAnyMeta<RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>, 2>>>
+    ptr: ForcedSendSync<Aligned<A4, Arc<SwapArcAnyMeta<RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>, 2>>>/*Arc<SwapArcAnyMeta<RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>/*Option<Arc<RawNode<T, NODE_KIND>>>*/, 2>>*/>,
     _phantom_data: PhantomData<T>,
 }
 
@@ -813,7 +820,7 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> Link<T, NODE_KIND> {
 
     #[inline(always)]
     fn ptr_inner(&self) -> &Aligned<A4, Arc<SwapArcAnyMeta<RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>, 2>>> {
-        unsafe { (&self.ptr as *const Aligned<A4, Arc<SwapArcAnyMeta<(), Option<Arc<()>>, 0>>>).cast::<Aligned<A4, Arc<SwapArcAnyMeta<RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>, 2>>>>().as_ref().unwrap_unchecked() }
+        &self.ptr.0
     }
 
     fn get(&self) -> LinkContent<'_, T, NODE_KIND/*SwapArcIntermediatePtrGuard<'_, RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>*//*, LinkContent<T, NODE_KIND>*/>/*LinkContent<T, NODE_KIND>*//*SwapArcIntermediateGuard<'_, LinkContent<T, NODE_KIND>>*/ {
@@ -979,7 +986,7 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> Link<T, NODE_KIND> {
     #[inline]
     fn invalid() -> Self {
         Self {
-            ptr: Aligned(Arc::new(SwapArcAnyMeta::new(None))),
+            ptr: ForcedSendSync(Aligned(Arc::new(SwapArcAnyMeta::new(None)))),
             _phantom_data: Default::default(),
         }
     }

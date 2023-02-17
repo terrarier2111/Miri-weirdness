@@ -6,6 +6,7 @@ use std::mem::{align_of, ManuallyDrop, MaybeUninit, size_of, transmute};
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::ptr::{addr_of, addr_of_mut, NonNull, null, null_mut};
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 // FIXME: add safety comments mentioning non-moving requirements (pinning)
 
@@ -276,4 +277,58 @@ struct ReadWriteAccess;
 #[inline]
 const fn is_inlined<T>() -> bool {
     !(size_of::<UnsafeCell<T>>() > size_of::<*mut T>() || align_of::<UnsafeCell<T>>() > align_of::<*mut T>())
+}
+
+pub struct AtomicInlinablePtr<T> {
+    ptr: AtomicPtr<T>,
+}
+
+impl<T> AtomicInlinablePtr<T> {
+
+    #[inline]
+    pub fn new_with(val: T, mut create: impl FnMut(T) -> *mut T) -> Self {
+        if !is_inlined::<T>() {
+            Self {
+                ptr: AtomicPtr::new(create(val)),
+            }
+        } else {
+            let mut ptr: *mut T = null_mut();
+            let addr = addr_of_mut!(ptr);
+            unsafe { addr.cast::<T>().write(val); }
+            Self {
+                ptr: AtomicPtr::new(ptr),
+            }
+        }
+    }
+
+    /// Note: the returned pointer is only guaranteed to be valid as long as
+    /// this instance of `SlimPtr` is alive.
+    #[inline]
+    pub fn as_ptr(&self, ordering: Ordering) -> *const T {
+        if !is_inlined::<T>() {
+            self.ptr.load(ordering)
+        } else {
+            addr_of!(self.ptr).cast::<AtomicPtr<T>>().load(ordering)
+        }
+    }
+
+    #[inline]
+    pub fn into_inner(self, ordering: Ordering) -> T {
+        unsafe { self.as_ptr(ordering).read() }
+    }
+
+    #[inline]
+    pub fn token(&self) -> UnsafeToken<'_, T, ReadAccess> {
+        /*let ptr = if !is_inlined::<T>() {
+            self.ptr
+        } else {
+            addr_of_mut!(self.ptr).cast::<T>()
+        };*/
+        let ptr = self.as_ptr().cast_mut();
+        UnsafeToken {
+            ptr,
+            _phantom_data: Default::default(),
+        }
+    }
+
 }

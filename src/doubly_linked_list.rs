@@ -63,10 +63,9 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> AtomicDoublyLinkedList<T, NODE_K
         {
             unreachable!("Arc's alignment can't be evaluated statically!");
         }
-        /*
         if align_of::<Arc<Aligned<A4, AtomicDoublyLinkedListNode<T, NODE_KIND>>>>() < 4 {
             unreachable!("Arc's alignment isn't sufficient!");
-        }*/
+        }
         let ret = Arc::new(Self {
             header_node: Arc::new(Aligned(AtomicDoublyLinkedListNode {
                 val: MaybeUninit::uninit(),
@@ -444,6 +443,16 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NO
         println!("POST right arc refs: {}", Arc::strong_count(&tmp_right));
         drop(tmp);*/
         // thread::sleep(Duration::from_millis(100));
+
+        unsafe {
+            // create_ref(this); // store_ref(node.left, <prev, false>) | in iter 1: head refs += 1
+
+            // increase the ref count by 1
+            // mem::forget(self.clone());
+            // create_ref(this);
+            node.left.set_unsafe/*::<false>*/(this);
+        }
+
         let mut back_off_weight = 1;
         // let node_ptr = Arc::as_ptr(node);
         let mut next;
@@ -451,14 +460,6 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NO
             println!("in loop!");
             next = self.right.get_full()/*self.right.get()*/; // = tail // FIXME: MIRI flags this because apparently the SwapArc here gets dropped while performing the `get_full` operation.
             println!("got full!");
-            unsafe {
-                // create_ref(this); // store_ref(node.left, <prev, false>) | in iter 1: head refs += 1
-
-                // increase the ref count by 1
-                // mem::forget(self.clone());
-                // create_ref(this);
-                node.left.set_unsafe/*::<false>*/(this);
-            }
             unsafe {
                 // create_ref(next.get_ptr()); // store_ref(node.right, <next, false>) | in iter 1: tail refs += 1
 
@@ -478,10 +479,9 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NO
                 break;
             }
             // unsafe { release_ref(next.get_ptr()); } // in iter 1: tail refs -= 1
-            if self.right.get_meta().get_deletion_marker() { // FIXME: err when using get() instead of get_meta()
+            if self.right/*.get()*/.get_meta().get_deletion_marker() { // FIXME: err when using get() instead of get_meta()
                 // release_ref(node); // this is probably unnecessary, as we don't delete the node, but reuse it
                 // delete_node(node);
-                println!("adding beffffore!");
                 return self.inner_add_before(node);
             }
             // back-off
@@ -490,7 +490,7 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NO
         }
         println!("added after!");
         // *cursor = node;
-        // let _/*prev*/ = self.correct_prev::<false>(next.get_ptr()); // FIXME: this isn't even called until it panics, so this can't be the cause!
+        let _/*prev*/ = self.correct_prev::<false>(next.get_ptr()); // FIXME: this isn't even called until it panics, so this can't be the cause!
         // unsafe { release_ref_2(prev, next.get_ptr()); }
         /*drop(next);
         println!("right: curr refs {} | intermediate refs: {}", self.right.ptr.curr_ref_cnt.load(Ordering::SeqCst), self.right.ptr.intermediate_ref_cnt.load(Ordering::SeqCst));
@@ -812,7 +812,6 @@ struct Link<T: Send + Sync, const NODE_KIND: NodeKind = { NodeKind::Bound }> {
     // ptr: Aligned<A4, AtomicPtr<RawNode<T, NODE_KIND>>>,
     // Aligned<A4, Arc<SwapArcAnyMeta<RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>, 2>>>
     ptr: ForcedSendSync<Aligned<A4, Arc<SwapArcAnyMeta<RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>, 2>>>/*Arc<SwapArcAnyMeta<RawNode<T, NODE_KIND>, Option<Arc<RawNode<T, NODE_KIND>>>/*Option<Arc<RawNode<T, NODE_KIND>>>*/, 2>>*/>,
-    _phantom_data: PhantomData<T>,
 }
 
 impl<T: Send + Sync, const NODE_KIND: NodeKind> Link<T, NODE_KIND> {
@@ -900,7 +899,7 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> Link<T, NODE_KIND> {
         }
 
         res*/
-        unsafe { self.ptr_inner().try_compare_exchange_ignore_meta(old, new.deref() as *const _) }
+        unsafe { self.ptr_inner().compare_exchange_with_meta/*try_compare_exchange_ignore_meta*/(old, new.deref() as *const _) }
     }
 
     fn try_set_addr_full_with_meta/*<const SET_DELETION_MARKER: bool>*/(
@@ -930,7 +929,7 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> Link<T, NODE_KIND> {
         }
 
         res*/
-        unsafe { self.ptr_inner().try_compare_exchange_with_meta(old, new) }
+        unsafe { self.ptr_inner().compare_exchange_with_meta(old, new) }
     }
 
     fn try_set_deletion_marker/*<const SET_DELETION_MARKER: bool>*/(&self, old: NodePtr<T, NODE_KIND>) -> bool {
@@ -987,7 +986,6 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> Link<T, NODE_KIND> {
     fn invalid() -> Self {
         Self {
             ptr: ForcedSendSync(Aligned(Arc::new(SwapArcAnyMeta::new(None)))),
-            _phantom_data: Default::default(),
         }
     }
 }
@@ -1022,9 +1020,7 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> LinkContent<'_, T, NODE_KIND> {
     }
 
     fn get_ptr(&self) -> NodePtr<T, NODE_KIND> {
-        ptr::from_exposed_addr_mut(
-            self.raw_ptr().expose_addr() & (!(DELETION_MARKER | DETACHED_MARKER)),
-        )
+        self.raw_ptr().map_addr(|x| x & (!(DELETION_MARKER | DETACHED_MARKER)))
     }
 
     /*
@@ -1083,8 +1079,9 @@ impl<'a, T, const NODE_KIND: NodeKind> Drop for LinkContent<'a, T, NODE_KIND> {
 }*/
 
 impl<T: Send + Sync, const NODE_KIND: NodeKind> PartialEq for LinkContent<'_, T, NODE_KIND> {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
-        self.raw_ptr().expose_addr() == other.raw_ptr().expose_addr()
+        self.raw_ptr() == other.raw_ptr()
     }
 }
 
@@ -1105,9 +1102,7 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> FullLinkContent<T, NODE_KIND> {
     }
 
     fn get_ptr(&self) -> NodePtr<T, NODE_KIND> {
-        ptr::from_exposed_addr_mut(
-            self.raw_ptr().expose_addr() & (!(DELETION_MARKER | DETACHED_MARKER)),
-        )
+        self.raw_ptr().map_addr(|x| x & !(DELETION_MARKER | DETACHED_MARKER))
     }
 
     /*
@@ -1159,7 +1154,7 @@ impl<T: Send + Sync> PtrGuardOrPtr<'_, T> {
     }
 
     fn as_ptr_no_meta(&self) -> *const T {
-        ptr::from_exposed_addr(self.as_ptr().expose_addr() & !Self::META_MASK)
+        self.as_ptr().map_addr(|x| x & !Self::META_MASK)
     }
 
 }
@@ -1250,109 +1245,3 @@ impl<T> Drop for SizedBox<T> {
         }
     }
 }
-
-/*
-pub struct DropOwned {
-
-}
-
-pub enum DropStrategy {
-    MemCpy, // this uses MaybeUninit and mem::replace
-    Deref,  // this uses Option::take
-}*/
-
-pub trait OwnedDrop: Sized {
-
-    fn drop_owned(self);
-
-}
-
-#[repr(transparent)]
-pub struct DropOwnedMemCpy<T: OwnedDrop> {
-    inner: MaybeUninit<T>,
-}
-
-impl<T: OwnedDrop> DropOwnedMemCpy<T> {
-    
-    pub fn new(val: T) -> Self {
-        Self {
-            inner: MaybeUninit::new(val),
-        }
-    }
-    
-}
-
-impl<T: OwnedDrop> Drop for DropOwnedMemCpy<T> {
-    fn drop(&mut self) {
-        let owned = mem::replace(&mut self.inner, MaybeUninit::uninit());
-        // SAFETY: This is safe because the previous inner value has to be
-        // initialized because `DropOwnedMemCpy` can only be created with
-        // an initialized value.
-        unsafe { owned.assume_init() }.drop_owned();
-    }
-}
-
-impl<T: OwnedDrop> Deref for DropOwnedMemCpy<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { self.inner.assume_init_ref() }
-    }
-}
-
-impl<T: OwnedDrop> DerefMut for DropOwnedMemCpy<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { self.inner.assume_init_mut() }
-    }
-}
-
-impl<T: OwnedDrop> From<T> for DropOwnedMemCpy<T> {
-    fn from(val: T) -> Self {
-        DropOwnedMemCpy::new(val)
-    }
-}
-
-/*
-pub struct DropOwnedDeref<T: OwnedDrop> {
-    inner: Option<T>,
-}
-
-impl<T: OwnedDrop> DropOwnedDeref<T> {
-
-    pub fn new(val: T) -> Self {
-        Self {
-            inner: Some(val),
-        }
-    }
-
-}
-
-impl<T: OwnedDrop> Drop for DropOwnedDeref<T> {
-    fn drop(&mut self) {
-        let owned = self.inner.take();
-        // SAFETY: This is safe because the previous inner value has to be
-        // initialized because `DropOwnedMemCpy` can only be created with
-        // an initialized value.
-        unsafe { owned.unwrap_unchecked() }.drop_owned();
-    }
-}
-
-impl<T: OwnedDrop> Deref for DropOwnedDeref<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { self.inner.as_ref().unwrap_unchecked() }
-    }
-}
-
-impl<T: OwnedDrop> DerefMut for DropOwnedDeref<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { self.inner.as_mut().unwrap_unchecked() }
-    }
-}
-
-impl<T: OwnedDrop> From<T> for DropOwnedDeref<T> {
-    fn from(val: T) -> Self {
-        DropOwnedDeref::new(val)
-    }
-}*/

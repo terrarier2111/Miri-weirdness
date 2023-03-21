@@ -280,7 +280,7 @@ impl<T: Send + Sync> AtomicDoublyLinkedListNode<T, { NodeKind::Bound }, false> {
         // drop(_tmp);
         let mut prev;
         loop { // FIXME: for some reason this loop never ends!
-            let next = self.right.get_full()/*self.right.get()*/;
+            let next = self.right.get()/*self.right.get()*/;
             if next.get_deletion_marker() {
                 // FIXME: do we need to drop the arc here as well? - we probably don't because the deletion marker on next (probably) means that this(`self`) node is already being deleted
                 /*if !next.get_ptr().is_null() &&
@@ -298,7 +298,7 @@ impl<T: Send + Sync> AtomicDoublyLinkedListNode<T, { NodeKind::Bound }, false> {
             drop(tmp);
             println!("curr right: {:?}", self.right.get().raw_ptr());
             println!("next: {:?}", next.raw_ptr());
-            if self.right.try_set_deletion_marker(next.raw_ptr()) {
+            if self.right.try_set_deletion_marker(next.raw_ptr()) { // FIXME: this always fails for some reason!
                 println!("did set right!");
                 loop {
                     prev = self.left.get_full()/*self.left.get()*/;
@@ -319,7 +319,7 @@ impl<T: Send + Sync> AtomicDoublyLinkedListNode<T, { NodeKind::Bound }, false> {
                 println!("left pre ptr: {:?}", self.left.get().raw_ptr());
                 println!("right pre ptr: {:?}", self.right.get().raw_ptr());
                 if let PtrGuardOrPtr::FullGuard(guard) = prev_tmp
-                    .correct_prev::<true>(/*leak_arc(unsafe { Arc::from_raw(next.get_ptr()) })*/next.get_ptr()) { // FIXME: PROBABLY: next is already freed when it gets derefed again
+                    .correct_prev::<true>(/*leak_arc(unsafe { Arc::from_raw(next.get_ptr()) })*/next.get_ptr()) {
                     prev = FullLinkContent {
                         ptr: guard, // FIXME: we get an unwrapped none panic in this line (in Bound mode) - that's probably because here we have a header node which we try to deref!
                     };
@@ -431,12 +431,12 @@ impl<T: Send + Sync, const NODE_KIND: NodeKind> AtomicDoublyLinkedListNode<T, NO
         let tmp_right = ManuallyDrop::new(unsafe { Arc::from_raw(tmp.get_ptr()) });
         // let tmp_left = ManuallyDrop::new(unsafe { Arc::from_raw(self.left.get().get_ptr().as_ref().unwrap()) });
         println!("PRE right arc refs: {}", Arc::strong_count(&tmp_right));*/
-        let this = Arc::as_ptr(self);
         if self.right./*get_full()*/get().raw_ptr().is_null() {
             println!("adding beffffore!");
             // if we are the tail, add before ourselves, not after
             return self.inner_add_before(node);
         }
+        let this = Arc::as_ptr(self);
         // println!("after check!");
         /*println!("POST right: curr refs {} | intermediate refs: {}", self.right.ptr.curr_ref_cnt.load(Ordering::SeqCst), self.right.ptr.intermediate_ref_cnt.load(Ordering::SeqCst));
         // let tmp_left = ManuallyDrop::new(unsafe { Arc::from_raw(self.left.get().get_ptr().as_ref().unwrap()) });

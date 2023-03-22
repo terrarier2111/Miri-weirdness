@@ -1,7 +1,7 @@
 use std::alloc::{alloc, dealloc, Layout};
 use std::ops::Deref;
 use std::process::abort;
-use std::ptr;
+use std::{alloc, ptr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use crossbeam_utils::{Backoff, CachePadded};
@@ -9,11 +9,16 @@ use likely_stable::unlikely;
 use swap_arc::{SwapArc, SwapArcAnyMeta, SwapArcOption};
 
 pub struct ConcurrentVec<T> {
-    alloc: SwapArcOption<SizedAlloc<T>>,
+    alloc: SwapArcOption<AllocArena<T>>,
     len: CachePadded<AtomicUsize>,
     push_far: CachePadded<AtomicUsize>,
     pop_far: CachePadded<AtomicUsize>,
     guard: CachePadded<AtomicUsize>,
+}
+
+struct AllocArena<T> {
+    data_alloc: SizedAlloc<T>,
+    meta_alloc: SizedAlloc<u8>,
 }
 
 const PUSH_OR_ITER_FLAG: usize = 1 << (usize::BITS as usize - 1);
@@ -79,24 +84,32 @@ impl<T> ConcurrentVec<T> {
         if let Some(cap) = self.alloc.load().as_ref() {
             let size = cap.size;
             if size == slot {
-                let old_alloc = cap.deref().ptr;
+                let old_data_alloc = cap.data_alloc.ptr;
+                let old_meta_alloc = cap.meta_alloc.ptr;
                 drop(cap);
-                unsafe { resize(self, size, old_alloc, slot); }
+                unsafe { resize(self, size, old_data_alloc, old_meta_alloc, slot); }
 
                 #[cold]
-                unsafe fn resize<T>(slf: &ConcurrentVec<T>, size: usize, old_alloc: *mut T, slot: usize) {
+                unsafe fn resize<T>(slf: &ConcurrentVec<T>, size: usize, old_data_alloc: *mut T, old_meta_alloc: *mut T, slot: usize) {
                     // wait until all previous writes finished
                     let mut backoff = Backoff::new();
                     while slf.len.load(Ordering::Acquire) != slot {
                         backoff.snooze();
                     }
-                    let alloc = unsafe { alloc(Layout::array::<T>(size * SCALE_FACTOR).unwrap()) }.cast();
-                    unsafe { ptr::copy_nonoverlapping(old_alloc, alloc, size); }
-                    slf.alloc.store(Some(Arc::new(SizedAlloc::new(alloc.cast(), size * SCALE_FACTOR))));
+                    let data_alloc = unsafe { alloc(Layout::array::<T>(size * SCALE_FACTOR).unwrap()) }.cast();
+                    unsafe { ptr::copy_nonoverlapping(old_data_alloc, data_alloc, size); }
+
+                    let meta_alloc = unsafe { alloc::alloc_zeroed(Layout::array::<u8>(size * SCALE_FACTOR).unwrap()) };
+                    unsafe { ptr::copy_nonoverlapping(old_meta_alloc, data_alloc, size); }
+
+                    slf.alloc.store(Some(Arc::new(AllocArena {
+                        data_alloc: SizedAlloc::new(data_alloc.cast(), size * SCALE_FACTOR),
+                        meta_alloc: SizedAlloc::new(meta_alloc, size * SCALE_FACTOR),
+                    })));
 
                     let mut backoff = Backoff::new();
                     // wait for the resize to be performed
-                    while slf.alloc.load().as_ref().as_ref().unwrap().size <= slot {
+                    while slf.alloc.load().as_ref().as_ref().unwrap().data_alloc.size <= slot {
                         backoff.snooze();
                     }
                 }
@@ -104,14 +117,19 @@ impl<T> ConcurrentVec<T> {
                 drop(cap);
                 let mut backoff = Backoff::new();
                 // wait for the resize to be performed
-                while self.alloc.load().as_ref().as_ref().unwrap().size <= slot {
+                while self.alloc.load().as_ref().as_ref().unwrap().data_alloc.size <= slot {
                     backoff.snooze();
                 }
             }
         } else {
             if slot == 0 {
-                let alloc = unsafe { alloc(Layout::array::<T>(INITIAL_CAP).unwrap()) };
-                self.alloc.store(Some(Arc::new(SizedAlloc::new(alloc.cast(), INITIAL_CAP))));
+                let data_alloc = unsafe { alloc(Layout::array::<T>(INITIAL_CAP).unwrap()) };
+                let meta_alloc = unsafe { alloc(Layout::array::<u8>(INITIAL_CAP).unwrap()) };
+
+                self.alloc.store(Some(Arc::new(AllocArena {
+                    data_alloc: SizedAlloc::new(data_alloc.cast(), INITIAL_CAP),
+                    meta_alloc: SizedAlloc::new(meta_alloc, INITIAL_CAP),
+                })));
             }
             let mut backoff = Backoff::new();
             // wait for the resize to be performed
@@ -228,20 +246,30 @@ impl<T> ConcurrentVec<T> {
         if let Some(cap) = self.alloc.load().as_ref() {
             let size = cap.size;
             if size < req {
-                let old_alloc = cap.deref().ptr;
+                let old_data_alloc = cap.data_alloc.ptr;
+                let old_meta_alloc = cap.meta_alloc.ptr;
                 drop(cap);
-                unsafe { resize(self, size, old_alloc); }
+                unsafe { resize(self, size, old_data_alloc, old_meta_alloc); }
 
                 #[cold]
-                unsafe fn resize<T>(slf: &ConcurrentVec<T>, size: usize, old_alloc: *mut T) {
-                    let alloc = unsafe { alloc(Layout::array::<T>(size * SCALE_FACTOR).unwrap()) }.cast();
-                    unsafe { ptr::copy_nonoverlapping(old_alloc, alloc, size); }
-                    slf.alloc.store(Some(Arc::new(SizedAlloc::new(alloc.cast(), size * SCALE_FACTOR))));
+                unsafe fn resize<T>(slf: &ConcurrentVec<T>, size: usize, old_data_alloc: *mut T, old_meta_alloc: *mut T) {
+                    let data_alloc = unsafe { alloc(Layout::array::<T>(size * SCALE_FACTOR).unwrap()) }.cast();
+                    let meta_alloc = unsafe { alloc(Layout::array::<u8>(size * SCALE_FACTOR).unwrap()) };
+                    unsafe { ptr::copy_nonoverlapping(old_data_alloc, data_alloc, size); }
+                    unsafe { ptr::copy_nonoverlapping(old_meta_alloc, meta_alloc, size); }
+                    slf.alloc.store(Some(Arc::new(AllocArena {
+                        data_alloc: SizedAlloc::new(data_alloc.cast(), size * SCALE_FACTOR),
+                        meta_alloc: SizedAlloc::new(meta_alloc, size * SCALE_FACTOR),
+                    })));
                 }
             }
         } else {
-            let alloc = unsafe { alloc(Layout::array::<T>(INITIAL_CAP).unwrap()) };
-            self.alloc.store(Some(Arc::new(SizedAlloc::new(alloc.cast(), INITIAL_CAP))));
+            let data_alloc = unsafe { alloc(Layout::array::<T>(INITIAL_CAP).unwrap()) };
+            let meta_alloc = unsafe { alloc(Layout::array::<u8>(INITIAL_CAP).unwrap()) };
+            self.alloc.store(Some(Arc::new(AllocArena {
+                data_alloc: SizedAlloc::new(data_alloc.cast(), INITIAL_CAP),
+                meta_alloc: SizedAlloc::new(meta_alloc, INITIAL_CAP),
+            })));
 
             let mut backoff = Backoff::new();
             // wait for the resize to be performed

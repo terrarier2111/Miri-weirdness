@@ -24,6 +24,9 @@ const POP_INC: usize = 1 << ((usize::BITS as usize - 3) / 2);
 const PUSH_OR_ITER_INC_BITS: usize = (POP_INC - PUSH_OR_ITER_INC) >> 2; // leave the two msb free (always 0), so we have a buffer
 const POP_INC_BITS: usize = ((1 << (usize::BITS as usize - 3)) - POP_INC) >> 2; // leave the two msb free (always 0), so we have a buffer
 
+const SOFT_GUARD_BIT: usize = 1 << (usize::BITS - 2);
+const HARD_GUARD_BIT: usize = 1 << (usize::BITS - 1);
+
 const SCALE_FACTOR: usize = 2;
 const INITIAL_CAP: usize = 8;
 
@@ -60,14 +63,14 @@ impl<T> ConcurrentVec<T> {
         let slot = push_far - pop_far;
 
         // check if we have hit the soft guard bit, if so, recover
-        if push_far == (1 << (usize::BITS - 2)) {
+        if push_far == SOFT_GUARD_BIT {
             // recover by decreasing the current counter
             self.pop_far.store(0, Ordering::Release);
             self.push_far.fetch_sub(pop_far, Ordering::Release);
         }
 
         // check if we have hit the hard guard bit, if so, abort.
-        if push_far >= (1 << (usize::BITS - 1)) {
+        if push_far >= HARD_GUARD_BIT {
             // we can't recover safely anymore because the vec grew too quickly.
             abort();
         }
@@ -126,17 +129,7 @@ impl<T> ConcurrentVec<T> {
             break;
         }
 
-        let mut guard_end = self.guard.fetch_sub(PUSH_OR_ITER_INC, Ordering::Release) - PUSH_OR_ITER_INC;
-        // check if somebody else will unset the flag
-        while guard_end & PUSH_OR_ITER_INC_BITS == 0 && guard_end & PUSH_OR_ITER_FLAG != 0 {
-            // get rid of the flag if there are no more on-going pushes or iterations
-            match self.guard.compare_exchange(guard_end, guard_end & !PUSH_OR_ITER_FLAG, Ordering::Release, Ordering::Relaxed) {
-                Ok(_) => break,
-                Err(err) => {
-                    guard_end = err;
-                }
-            }
-        }
+        self.dec_push_or_iter_cnt();
     }
 
     pub fn pop(&self) -> Option<T> {
@@ -160,7 +153,8 @@ impl<T> ConcurrentVec<T> {
         let pop_far = self.pop_far.fetch_add(1, Ordering::AcqRel);
 
         if pop_far >= push_far {
-            self.pop_far.fetch_sub(1, Ordering::Release);
+            self.pop_far.fetch_sub(1, Ordering::Relaxed);
+            self.dec_pop_cnt();
             return None;
         }
 
@@ -169,7 +163,7 @@ impl<T> ConcurrentVec<T> {
         let slot = push_far - pop_far - 1;
 
         // check if we have hit the hard guard bit, if so, abort.
-        if push_far >= (1 << (usize::BITS - 1)) {
+        if push_far >= HARD_GUARD_BIT {
             // we can't recover safely anymore because the vec grew too quickly.
             abort();
         }
@@ -181,17 +175,8 @@ impl<T> ConcurrentVec<T> {
         } else {
             None
         };
-        let mut guard_end = self.guard.fetch_sub(POP_INC, Ordering::Release) - POP_INC;
-        // check if somebody else will unset the flag
-        while guard_end & POP_INC_BITS == 0 && guard_end & POP_FLAG != 0 {
-            // get rid of the flag if there are no more on-going pushes or iterations
-            match self.guard.compare_exchange(guard_end, guard_end & !POP_FLAG, Ordering::Release, Ordering::Relaxed) {
-                Ok(_) => break,
-                Err(err) => {
-                    guard_end = err;
-                }
-            }
-        }
+
+        self.dec_pop_cnt();
 
         ret
     }
@@ -299,6 +284,35 @@ impl<T> ConcurrentVec<T> {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    fn dec_push_or_iter_cnt(&self) {
+        let mut guard_end = self.guard.fetch_sub(PUSH_OR_ITER_INC, Ordering::Release) - PUSH_OR_ITER_INC;
+        // check if somebody else will unset the flag
+        while guard_end & PUSH_OR_ITER_INC_BITS == 0 && guard_end & PUSH_OR_ITER_FLAG != 0 {
+            // get rid of the flag if there are no more on-going pushes or iterations
+            match self.guard.compare_exchange(guard_end, guard_end & !PUSH_OR_ITER_FLAG, Ordering::Release, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(err) => {
+                    guard_end = err;
+                }
+            }
+        }
+    }
+
+    fn dec_pop_cnt(&self) {
+        let mut guard_end = self.guard.fetch_sub(POP_INC, Ordering::Release) - POP_INC;
+        // check if somebody else will unset the flag
+        while guard_end & POP_INC_BITS == 0 && guard_end & POP_FLAG != 0 {
+            // get rid of the flag if there are no more on-going pushes or iterations
+            match self.guard.compare_exchange(guard_end, guard_end & !POP_FLAG, Ordering::Release, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(err) => {
+                    guard_end = err;
+                }
+            }
+        }
+    }
+
 }
 
 impl<T> Drop for ConcurrentVec<T> {
@@ -372,7 +386,6 @@ impl<'a, T> Iterator for Iter<'a, T> {
 
 impl<'a, T> Drop for Iter<'a, T> {
     fn drop(&mut self) {
-        // decrement the `push_or_iter` counter
-        self.parent.guard.fetch_sub(PUSH_OR_ITER_INC, Ordering::Release);
+        self.parent.dec_push_or_iter_cnt();
     }
 }

@@ -4,15 +4,16 @@ use std::process::abort;
 use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use crossbeam_utils::Backoff;
+use crossbeam_utils::{Backoff, CachePadded};
+use likely_stable::unlikely;
 use swap_arc::{SwapArc, SwapArcAnyMeta, SwapArcOption};
 
 pub struct ConcurrentVec<T> {
     alloc: SwapArcOption<SizedAlloc<T>>,
-    len: AtomicUsize,
-    push_far: AtomicUsize,
-    pop_far: AtomicUsize,
-    guard: AtomicUsize,
+    len: CachePadded<AtomicUsize>,
+    push_far: CachePadded<AtomicUsize>,
+    pop_far: CachePadded<AtomicUsize>,
+    guard: CachePadded<AtomicUsize>,
 }
 
 const PUSH_OR_ITER_FLAG: usize = 1 << (usize::BITS as usize - 1);
@@ -63,14 +64,14 @@ impl<T> ConcurrentVec<T> {
         let slot = push_far - pop_far;
 
         // check if we have hit the soft guard bit, if so, recover
-        if push_far == SOFT_GUARD_BIT {
+        if unlikely(push_far == SOFT_GUARD_BIT) {
             // recover by decreasing the current counter
             self.pop_far.store(0, Ordering::Release);
             self.push_far.fetch_sub(pop_far, Ordering::Release);
         }
 
         // check if we have hit the hard guard bit, if so, abort.
-        if push_far >= HARD_GUARD_BIT {
+        if unlikely(push_far >= HARD_GUARD_BIT) {
             // we can't recover safely anymore because the vec grew too quickly.
             abort();
         }
@@ -125,7 +126,15 @@ impl<T> ConcurrentVec<T> {
                 continue;
             }
             unsafe { cap.deref().ptr.add(slot).write(val); }
-            self.len.fetch_add(1, Ordering::Release);
+
+            let mut backoff = Backoff::new();
+            // we have to ensure that all slots up to len_new
+            // are inhabited before we can increment the len
+            while self.len.compare_exchange_weak(slot, slot + 1, Ordering::Release, Ordering::Relaxed).is_err() {
+                backoff.snooze();
+            }
+
+            // self.len.fetch_add(1, Ordering::Release); // FIXME: this is probably invalid as
             break;
         }
 
@@ -152,7 +161,7 @@ impl<T> ConcurrentVec<T> {
         let push_far = self.push_far.load(Ordering::Acquire);
         let pop_far = self.pop_far.fetch_add(1, Ordering::AcqRel);
 
-        if pop_far >= push_far {
+        if unlikely(pop_far >= push_far) {
             self.pop_far.fetch_sub(1, Ordering::Relaxed);
             self.dec_pop_cnt();
             return None;
@@ -163,7 +172,7 @@ impl<T> ConcurrentVec<T> {
         let slot = push_far - pop_far - 1;
 
         // check if we have hit the hard guard bit, if so, abort.
-        if push_far >= HARD_GUARD_BIT {
+        if unlikely(push_far >= HARD_GUARD_BIT) {
             // we can't recover safely anymore because the vec grew too quickly.
             abort();
         }
@@ -288,7 +297,7 @@ impl<T> ConcurrentVec<T> {
     fn dec_push_or_iter_cnt(&self) {
         let mut guard_end = self.guard.fetch_sub(PUSH_OR_ITER_INC, Ordering::Release) - PUSH_OR_ITER_INC;
         // check if somebody else will unset the flag
-        while guard_end & PUSH_OR_ITER_INC_BITS == 0 && guard_end & PUSH_OR_ITER_FLAG != 0 {
+        while guard_end & PUSH_OR_ITER_INC_BITS == 0 {
             // get rid of the flag if there are no more on-going pushes or iterations
             match self.guard.compare_exchange(guard_end, guard_end & !PUSH_OR_ITER_FLAG, Ordering::Release, Ordering::Relaxed) {
                 Ok(_) => break,
@@ -302,7 +311,7 @@ impl<T> ConcurrentVec<T> {
     fn dec_pop_cnt(&self) {
         let mut guard_end = self.guard.fetch_sub(POP_INC, Ordering::Release) - POP_INC;
         // check if somebody else will unset the flag
-        while guard_end & POP_INC_BITS == 0 && guard_end & POP_FLAG != 0 {
+        while guard_end & POP_INC_BITS == 0 {
             // get rid of the flag if there are no more on-going pushes or iterations
             match self.guard.compare_exchange(guard_end, guard_end & !POP_FLAG, Ordering::Release, Ordering::Relaxed) {
                 Ok(_) => break,

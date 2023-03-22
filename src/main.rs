@@ -20,13 +20,12 @@ use std::{io, mem, thread};
 use std::hint::black_box;
 use std::io::{Error, ErrorKind, Read, Write};
 use std::mem::{ManuallyDrop, transmute};
-use std::sync::{Arc, mpsc};
-use std::time::Duration;
+use std::sync::{Arc, mpsc, Mutex};
+use std::time::{Duration, Instant};
 use crossbeam_utils::Backoff;
 use rand::{Rng, thread_rng};
 use serde::{Deserialize, Serialize};
 use crate::conc_vec::ConcurrentVec;
-use crate::doubly_linked_list::{AtomicDoublyLinkedList, NodeKind};
 use crate::linked_list::LinkedList;
 use crate::rustlings::test_main;
 
@@ -132,7 +131,8 @@ fn main() {
 
     // loop {}
     // let doubly_linked_list: Arc<AtomicDoublyLinkedList<i32, { NodeKind::Bound }>> = AtomicDoublyLinkedList::new();
-    let list = Arc::new(ConcurrentVec::new());
+    let start = Instant::now();
+    let list = Arc::new(/*Mutex::new(vec![])*/ConcurrentVec::new());
     let mut threads = vec![];
     // let (mut send, mut recv) = mpsc::channel();
     // FIXME: with only adder threads, a normal execution finishes, but a miri execution (at least seems to) loop infinitely - but this could also just be because of worse
@@ -143,58 +143,58 @@ fn main() {
     // FIXME: the correct result gets computed
 
     // FIXME: everything works up to 20 pusher and 10 remover threads at least and up to 2000 iters per thread at least
-    for _ in 0../*20*/10/*5*//*1*/ {
+    for _ in 0../*20*/20/*5*//*1*/ {
         let list = list.clone();
         threads.push(thread::spawn(move || {
-            for x in 0..40/*2000*//*200*/ {
-                mem::forget(list.push(x));
-                if x % 5 == 0 {
+            for x in 0..20000/*2000*//*200*/ {
+                list/*.lock().unwrap()*/.push(x);
+                /*if x % 5 == 0 {
                     println!("completed push: {x}");
-                }
+                }*/
                 // thread::sleep(Duration::from_millis(1000));
             }
         }));
     }
     // threads.drain(..).for_each(|thread| thread.join().unwrap());
     // println!("finished pushes");
-    for _ in 0..10/*20*//*5*//*1*/ {
+    for _ in 0..20/*20*//*5*//*1*/ {
         // let send = send.clone();
         let list = list.clone();
         threads.push(thread::spawn(move || {
             // let send = send.clone();
-            for x in 0..40/*2000*//*200*/ {
+            for x in 0..20000/*2000*//*200*/ {
                 /*
                 thread::sleep(Duration::from_millis(500));
                 println!("{:?}", list.remove_head());
                 thread::sleep(Duration::from_millis(500));*/
                 // send.send(list.remove_head()).unwrap();
-                for k in list.iter() {
-                    black_box(k);
-                }
-                if x % 5 == 0 {
+                // let mut tmp = list.lock().unwrap();
+                let mut iter = list.iter()/*tmp.iter()*/;
+                black_box(iter.next());
+                /*if x % 5 == 0 {
                     println!("completed iters: {x}");
-                }
+                }*/
             }
         }));
     }
-    for _ in 0..10/*20*//*5*//*1*/ {
+    for _ in 0..20/*20*//*5*//*1*/ {
         // let send = send.clone();
         let list = list.clone();
         threads.push(thread::spawn(move || {
             // let send = send.clone();
-            for x in 0..40/*2000*//*200*/ {
+            for x in 0..20000/*2000*//*200*/ {
                 /*
                 thread::sleep(Duration::from_millis(500));
                 println!("{:?}", list.remove_head());
                 thread::sleep(Duration::from_millis(500));*/
                 // send.send(list.remove_head()).unwrap();
                 let mut backoff = Backoff::new();
-                while list.pop().is_none() {
+                while list/*.lock().unwrap()*/.pop().is_none() {
                     backoff.snooze();
                 }
-                if x % 5 == 0 {
+                /*if x % 5 == 0 {
                     println!("completed removals: {x}");
-                }
+                }*/
             }
         }));
     }
@@ -213,12 +213,15 @@ fn main() {
     */
     // threads.into_iter().for_each(|thread| thread.join().unwrap());
     threads.into_iter().for_each(|thread| thread.join().unwrap());
+    let end = Instant::now();
+    let diff = end.duration_since(start);
+    println!("It took: {:?}", diff);
     /*doubly_linked_list.remove_head();
     doubly_linked_list.remove_head();
     doubly_linked_list.remove_head();
     doubly_linked_list.remove_head();*/
-    println!("list empty: {}", list.is_empty());
-    if list.is_empty() {
+    println!("list empty: {}", list/*.lock().unwrap()*/.is_empty());
+    if list/*.lock().unwrap()*/.is_empty() {
         println!("Aggressive push/pop testsuite passed!");
     }
     // println!("test: {:?}", test);

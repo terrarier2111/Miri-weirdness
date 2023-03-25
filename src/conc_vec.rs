@@ -3,35 +3,47 @@ use std::ops::Deref;
 use std::process::abort;
 use std::{alloc, ptr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use crossbeam_utils::{Backoff, CachePadded};
 use likely_stable::unlikely;
 use swap_arc::{SwapArc, SwapArcAnyMeta, SwapArcOption};
 
 pub struct ConcurrentVec<T> {
     alloc: SwapArcOption<AllocArena<T>>,
-    len: CachePadded<AtomicUsize>,
-    push_far: CachePadded<AtomicUsize>,
-    pop_far: CachePadded<AtomicUsize>,
     guard: CachePadded<AtomicUsize>,
 }
 
 struct AllocArena<T> {
     data_alloc: SizedAlloc<T>,
-    meta_alloc: SizedAlloc<u8>,
+    meta_alloc: SizedAlloc<AtomicU8>,
 }
 
-const PUSH_OR_ITER_FLAG: usize = 1 << (usize::BITS as usize - 1);
-const POP_FLAG: usize = 1 << (usize::BITS as usize - 2);
-const LOCK_FLAG: usize = 1 << (usize::BITS as usize - 3);
+#[derive(Copy, Clone, PartialEq)]
+#[repr(usize)]
+enum State {
+    Idle = 0,
+    Push = 1,
+    Pop = 2,
+    Lock = 3,
+}
 
-const PUSH_OR_ITER_INC: usize = 1 << 0;
-const POP_INC: usize = 1 << ((usize::BITS as usize - 3) / 2);
+impl State {
+
+    fn to_raw(self) -> usize {
+        (self as usize) << (usize::BITS as usize - 2)
+    }
+
+    fn from_raw(raw: usize) -> Self {
+        (raw >> (usize::BITS as usize - 2)) as State
+    }
+
+}
+
+const PUSH_OR_ITER_INC: usize = 1 << 0; // for 64 bit arch: 15 bits
+const POP_INC: usize = 1 << ((usize::BITS as usize - 2) / 2 / 2); // for 64 bit arch: 15 bits | offset = (64 - 2) / 2 / 2 = 31 / 2 = 15 = 15
+const LEN_INC: usize = 1 << (usize::BITS as usize / 2 - 2); // for 64 bit arch: 32 bits | offset = 64 / 2 - 2 = 30
 const PUSH_OR_ITER_INC_BITS: usize = (POP_INC - PUSH_OR_ITER_INC) >> 2; // leave the two msb free (always 0), so we have a buffer
-const POP_INC_BITS: usize = ((1 << (usize::BITS as usize - 3)) - POP_INC) >> 2; // leave the two msb free (always 0), so we have a buffer
-
-const SOFT_GUARD_BIT: usize = 1 << (usize::BITS - 2);
-const HARD_GUARD_BIT: usize = 1 << (usize::BITS - 1);
+const POP_INC_BITS: usize = ((1 << (usize::BITS as usize - 2)) - POP_INC) >> 2; // leave the two msb free (always 0), so we have a buffer
 
 const SCALE_FACTOR: usize = 2;
 const INITIAL_CAP: usize = 8;
@@ -40,9 +52,6 @@ impl<T> ConcurrentVec<T> {
     pub fn new() -> Self {
         Self {
             alloc: SwapArcAnyMeta::new(None),
-            len: Default::default(),
-            push_far: Default::default(),
-            pop_far: Default::default(),
             guard: Default::default(),
         }
     }
@@ -99,11 +108,11 @@ impl<T> ConcurrentVec<T> {
                     let data_alloc = unsafe { alloc(Layout::array::<T>(size * SCALE_FACTOR).unwrap()) }.cast();
                     unsafe { ptr::copy_nonoverlapping(old_data_alloc, data_alloc, size); }
 
-                    let meta_alloc = unsafe { alloc::alloc_zeroed(Layout::array::<u8>(size * SCALE_FACTOR).unwrap()) };
+                    let meta_alloc = unsafe { alloc::alloc_zeroed(Layout::array::<AtomicU8>(size * SCALE_FACTOR).unwrap()) }.cast();
                     unsafe { ptr::copy_nonoverlapping(old_meta_alloc, data_alloc, size); }
 
                     slf.alloc.store(Some(Arc::new(AllocArena {
-                        data_alloc: SizedAlloc::new(data_alloc.cast(), size * SCALE_FACTOR),
+                        data_alloc: SizedAlloc::new(data_alloc, size * SCALE_FACTOR),
                         meta_alloc: SizedAlloc::new(meta_alloc, size * SCALE_FACTOR),
                     })));
 
@@ -123,11 +132,11 @@ impl<T> ConcurrentVec<T> {
             }
         } else {
             if slot == 0 {
-                let data_alloc = unsafe { alloc(Layout::array::<T>(INITIAL_CAP).unwrap()) };
-                let meta_alloc = unsafe { alloc(Layout::array::<u8>(INITIAL_CAP).unwrap()) };
+                let data_alloc = unsafe { alloc(Layout::array::<T>(INITIAL_CAP).unwrap()) }.cast();
+                let meta_alloc = unsafe { alloc(Layout::array::<u8>(INITIAL_CAP).unwrap()) }.cast();
 
                 self.alloc.store(Some(Arc::new(AllocArena {
-                    data_alloc: SizedAlloc::new(data_alloc.cast(), INITIAL_CAP),
+                    data_alloc: SizedAlloc::new(data_alloc, INITIAL_CAP),
                     meta_alloc: SizedAlloc::new(meta_alloc, INITIAL_CAP),
                 })));
             }
@@ -140,10 +149,10 @@ impl<T> ConcurrentVec<T> {
         loop {
             let cap = self.alloc.load();
             let cap = cap.as_ref().as_ref().unwrap();
-            if cap.size <= slot {
+            if cap.data_alloc.size <= slot {
                 continue;
             }
-            unsafe { cap.deref().ptr.add(slot).write(val); }
+            unsafe { cap.data_alloc.ptr.add(slot).write(val); }
 
             let mut backoff = Backoff::new();
             // we have to ensure that all slots up to len_new
@@ -152,7 +161,6 @@ impl<T> ConcurrentVec<T> {
                 backoff.snooze();
             }
 
-            // self.len.fetch_add(1, Ordering::Release); // FIXME: this is probably invalid as
             break;
         }
 
@@ -196,7 +204,8 @@ impl<T> ConcurrentVec<T> {
         }
 
         let ret = if let Some(cap) = self.alloc.load().as_ref() {
-            let val = unsafe { cap.deref().ptr.add(slot).read() };
+            let val = unsafe { cap.data_alloc.ptr.add(slot).read() };
+            unsafe { cap.meta_alloc.ptr.add(slot).as_ref().unwrap() }.store(0, Ordering::Release);
             self.len.fetch_sub(1, Ordering::Release);
             Some(val)
         } else {
@@ -254,20 +263,20 @@ impl<T> ConcurrentVec<T> {
                 #[cold]
                 unsafe fn resize<T>(slf: &ConcurrentVec<T>, size: usize, old_data_alloc: *mut T, old_meta_alloc: *mut T) {
                     let data_alloc = unsafe { alloc(Layout::array::<T>(size * SCALE_FACTOR).unwrap()) }.cast();
-                    let meta_alloc = unsafe { alloc(Layout::array::<u8>(size * SCALE_FACTOR).unwrap()) };
+                    let meta_alloc = unsafe { alloc(Layout::array::<AtomicU8>(size * SCALE_FACTOR).unwrap()) }.cast();
                     unsafe { ptr::copy_nonoverlapping(old_data_alloc, data_alloc, size); }
                     unsafe { ptr::copy_nonoverlapping(old_meta_alloc, meta_alloc, size); }
                     slf.alloc.store(Some(Arc::new(AllocArena {
-                        data_alloc: SizedAlloc::new(data_alloc.cast(), size * SCALE_FACTOR),
+                        data_alloc: SizedAlloc::new(data_alloc, size * SCALE_FACTOR),
                         meta_alloc: SizedAlloc::new(meta_alloc, size * SCALE_FACTOR),
                     })));
                 }
             }
         } else {
-            let data_alloc = unsafe { alloc(Layout::array::<T>(INITIAL_CAP).unwrap()) };
-            let meta_alloc = unsafe { alloc(Layout::array::<u8>(INITIAL_CAP).unwrap()) };
+            let data_alloc = unsafe { alloc(Layout::array::<T>(INITIAL_CAP).unwrap()) }.cast();
+            let meta_alloc = unsafe { alloc(Layout::array::<AtomicU8>(INITIAL_CAP).unwrap()) }.cast();
             self.alloc.store(Some(Arc::new(AllocArena {
-                data_alloc: SizedAlloc::new(data_alloc.cast(), INITIAL_CAP),
+                data_alloc: SizedAlloc::new(data_alloc, INITIAL_CAP),
                 meta_alloc: SizedAlloc::new(meta_alloc, INITIAL_CAP),
             })));
 
@@ -281,10 +290,13 @@ impl<T> ConcurrentVec<T> {
         let alloc = self.alloc.load();
         let alloc = alloc.as_ref().as_ref().unwrap();
         let alloc = alloc.deref();
-        let ptr = alloc.ptr;
+        let data_ptr = alloc.data_alloc.ptr;
+        let meta_ptr = alloc.meta_alloc.ptr;
         let len = self.len();
-        unsafe { ptr::copy(ptr.add(idx), ptr.add(idx).add(1), len - idx); }
-        unsafe { ptr.add(idx).write(val); }
+        unsafe { ptr::copy(data_ptr.add(idx), data_ptr.add(idx).add(1), len - idx); }
+        unsafe { data_ptr.add(idx).write(val); }
+        unsafe { ptr::copy(meta_ptr.add(idx), meta_ptr.add(idx).add(1), len - idx); }
+        unsafe { meta_ptr.add(idx).as_ref().unwrap() }.store(1, Ordering::Release);
         self.len.store(len + 1, Ordering::Release);
 
         self.guard.fetch_and(!LOCK_FLAG, Ordering::Release);

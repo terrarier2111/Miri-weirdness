@@ -4,7 +4,6 @@
 #![feature(strict_provenance)]
 #![feature(adt_const_params)]
 #![feature(arbitrary_self_types)]
-#![feature(const_result_drop)]
 #![feature(const_option)]
 #![feature(strict_provenance_atomic_ptr)]
 
@@ -13,6 +12,8 @@ mod rustlings;
 mod doubly_linked_list;
 mod new_design;
 mod conc_vec;
+mod bbring;
+mod conc_vec_2;
 
 use std::arch::asm;
 use std::cmp::Ordering;
@@ -20,12 +21,13 @@ use std::{io, mem, thread};
 use std::hint::black_box;
 use std::io::{Error, ErrorKind, Read, Write};
 use std::mem::{ManuallyDrop, transmute};
-use std::sync::{Arc, mpsc, Mutex};
+use std::sync::{Arc, atomic, mpsc, Mutex};
+use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
 use crossbeam_utils::Backoff;
 use rand::{Rng, thread_rng};
 use serde::{Deserialize, Serialize};
-use crate::conc_vec::ConcurrentVec;
+use crate::bbring::BBRing;
 use crate::linked_list::LinkedList;
 use crate::rustlings::test_main;
 
@@ -131,7 +133,7 @@ fn main() {
 
     // loop {}
     // let doubly_linked_list: Arc<AtomicDoublyLinkedList<i32, { NodeKind::Bound }>> = AtomicDoublyLinkedList::new();
-    let start = Instant::now();
+    /*let start = Instant::now();
     let list = Arc::new(/*Mutex::new(vec![])*/ConcurrentVec::new());
     let mut threads = vec![];
     // let (mut send, mut recv) = mpsc::channel();
@@ -223,9 +225,49 @@ fn main() {
     println!("list empty: {}", list/*.lock().unwrap()*/.is_empty());
     if list/*.lock().unwrap()*/.is_empty() {
         println!("Aggressive push/pop testsuite passed!");
-    }
+    }*/
     // println!("test: {:?}", test);
-    loop {}
+    let mut data_vecs = vec![];
+    for _ in 0..20 {
+        data_vecs.push({
+            let data_len = thread_rng().gen_range(1..(2048 / 20)/*(2048 / 20)..2048*/);
+            let mut data: Vec<u8> = Vec::with_capacity(data_len);
+            for _ in 0..data_len {
+                data.push(rand::random());
+            }
+            data
+        });
+    }
+    let data_vecs = Arc::new(data_vecs);
+    let ring = Arc::new(BBRing::new(2048));
+    let mut threads = vec![];
+    let cnt = Arc::new(AtomicUsize::default());
+    for i in 0..20 {
+        let tmp = ring.clone();
+        let tmp_vecs = data_vecs.clone();
+        let cnt = cnt.clone();
+        threads.push(thread::spawn(move || {
+            if !tmp.push(tmp_vecs[i].as_ref()) {
+                println!("failed to push!");
+            } else {
+                println!("pushed {} size: {}", cnt.fetch_add(1, atomic::Ordering::AcqRel), tmp_vecs[i].len());
+            }
+        }));
+    }
+    {
+        let tmp = ring.clone();
+        threads.push(thread::spawn(move || {
+            for _ in 0..20 {
+                while tmp.pop_front().is_none() {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                println!("popped!");
+            }
+        }));
+    }
+    threads.into_iter().for_each(|handle| {
+        handle.join();
+    });
 }
 
 /*

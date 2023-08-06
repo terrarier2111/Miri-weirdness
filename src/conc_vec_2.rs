@@ -1,4 +1,5 @@
 use std::alloc::{dealloc, Layout};
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicPtr, AtomicUsize};
 
 const PTR_WIDTH: usize = usize::BITS as usize;
@@ -12,6 +13,7 @@ pub struct ConcVec<T> {
     buckets: [AtomicPtr<()>; PTR_WIDTH],
     bucket_meta: [AtomicPtr<()>; PTR_WIDTH], // FIXME: how can we dealloc this? should we store it inline in the other allocs instead?
     meta_allocated: AtomicUsize, // the Nth bit indicates whether the metadata for bucket N was already allocated
+    _phantom_data: PhantomData<T>,
 }
 
 impl<T> ConcVec<T> {

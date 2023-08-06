@@ -14,6 +14,11 @@ mod new_design;
 mod conc_vec;
 mod bbring;
 mod conc_vec_2;
+mod rb_tree;
+mod binary_search_tree;
+mod optimizing_rb_tree;
+mod optimizing_avl_tree;
+mod avl_tree;
 
 use std::arch::asm;
 use std::cmp::Ordering;

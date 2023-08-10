@@ -34,6 +34,7 @@ use rand::{Rng, thread_rng};
 use serde::{Deserialize, Serialize};
 use crate::bbring::BBRing;
 use crate::linked_list::LinkedList;
+use crate::rb_tree::RbTree;
 use crate::rustlings::test_main;
 
 fn main() {
@@ -232,7 +233,7 @@ fn main() {
         println!("Aggressive push/pop testsuite passed!");
     }*/
     // println!("test: {:?}", test);
-    let mut data_vecs = vec![];
+    /*let mut data_vecs = vec![];
     for _ in 0..20 {
         data_vecs.push({
             let data_len = thread_rng().gen_range(1..(2048 / 20)/*(2048 / 20)..2048*/);
@@ -273,6 +274,20 @@ fn main() {
     threads.into_iter().for_each(|handle| {
         handle.join();
     });
+    */
+    let mut tree = RbTree::new();
+    for i in 0..20 {
+        tree.insert(i, format!("test {}", i));
+        println!("inserted: {}", i);
+        println!("tree: {:?}", tree);
+        assert_eq!(tree.get(&i), Some(&format!("test {}", i)));
+        assert_eq!(tree.get(&(i + 1)), None);
+    }
+    for i in 0..20 {
+        assert_eq!(tree.get(&i), Some(&format!("test {}", i)));
+        assert_eq!(tree.get(&(1 + 20)), None);
+    }
+    println!("tree:\n{:?}", tree);
 }
 
 /*

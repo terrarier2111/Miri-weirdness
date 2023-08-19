@@ -168,10 +168,14 @@ impl<K: Ord, T> TreeNode<K, T> {
             unsafe { left.as_mut() }.parent = self.parent;
         }
         if let Some(mut parent) = self.parent {
+            assert_eq!(unsafe { parent.as_ref() }.child_dir(unsafe { NonNull::new_unchecked(self as *mut TreeNode<K, T>) }), Direction::Right);
             unsafe { parent.as_mut() }.right = left;
             let new_parent = unsafe { parent.as_ref() }.parent;
             unsafe { parent.as_mut() }.parent = Some(unsafe { NonNull::new_unchecked(self as *mut TreeNode<K, T>) });
             self.parent = new_parent;
+        } else {
+            self.parent = None;
+            assert!(left.is_none());
         }
     }
 
@@ -207,13 +211,13 @@ impl<K: Ord, T> TreeNode<K, T> {
     fn insert(mut slf: NonNull<Self>, root: *mut Option<NonNull<TreeNode<K, T>>>, key: K, value: T) {
         match unsafe { slf.as_ref() }.key.cmp(&key) {
             Ordering::Less => {
-                if let Some(mut node) = unsafe { slf.as_ref() }.left {
+                if let Some(node) = unsafe { slf.as_ref() }.right {
                     Self::insert(node, root, key, value);
                 } else {
                     let node_raw = unsafe { alloc(Layout::new::<TreeNode<K, T>>()) }.cast::<TreeNode<K, T>>();
                     if !node_raw.is_null() {
                         let node = unsafe { NonNull::new_unchecked(node_raw) };
-                        unsafe { slf.as_mut() }.left = Some(node);
+                        unsafe { slf.as_mut() }.right = Some(node);
                         unsafe {
                             node_raw.write(TreeNode {
                                 parent: Some(slf),
@@ -234,7 +238,7 @@ impl<K: Ord, T> TreeNode<K, T> {
             },
             Ordering::Equal => panic!("Tried to insert a key that is already present"),
             Ordering::Greater => {
-                if let Some(node) = unsafe { slf.as_ref() }.right {
+                if let Some(node) = unsafe { slf.as_ref() }.left {
                     Self::insert(node, root, key, value);
                 } else {
                     let node = unsafe { alloc(Layout::new::<TreeNode<K, T>>()) }.cast::<TreeNode<K, T>>();
@@ -250,7 +254,7 @@ impl<K: Ord, T> TreeNode<K, T> {
                             })
                         };
                         let node = unsafe { NonNull::new_unchecked(node) };
-                        unsafe { slf.as_mut() }.right = Some(node);
+                        unsafe { slf.as_mut() }.left = Some(node);
                         if unsafe { slf.as_ref() }.color == Color::Red {
                             println!("recoloring...!");
                             // we need fixing up the color properties
@@ -355,8 +359,12 @@ impl<K: Ord, T> TreeNode<K, T> {
 
     fn recolor_2(node: NonNull<TreeNode<K, T>>, root: *mut Option<NonNull<TreeNode<K, T>>>) {
         let mut curr = node;
+        let mut iter = 0;
         while let Some(mut parent) = unsafe { curr.as_ref() }.parent {
+            println!("iter: {}", iter);
+            iter += 1;
                 if unsafe { parent.as_ref() }.color == Color::Black {
+                    println!("got black parent!");
                     break;
                 }
                 if let Some(mut gp) = unsafe { parent.as_ref() }.parent {
@@ -364,9 +372,7 @@ impl<K: Ord, T> TreeNode<K, T> {
                     if maybe_uncle.map(|uncle| unsafe { uncle.as_ref() }.color == Color::Red).unwrap_or(false) {
                         // recolor and if parent's parent is not root, recolor it and recheck
                         unsafe { parent.as_mut() }.color = Color::Black;
-                        if let Some(mut uncle) = maybe_uncle {
-                            unsafe { uncle.as_mut() }.color = Color::Black;
-                        }
+                        unsafe { maybe_uncle.unwrap().as_mut() }.color = Color::Black;
                         // check if gp isn't root
                         if unsafe { gp.as_ref() }.parent.is_none() {
                             break;
@@ -428,10 +434,16 @@ impl<K: Ord, T> TreeNode<K, T> {
                             break;
                         }
                     }
+                    println!("went through!");
+                } else {
+                    panic!("weird state!");
                 }
             }
-        unsafe { curr.as_mut() }.color = Color::Black;
-        unsafe { *root = Some(curr) };
+        // check if node is root
+        if unsafe { curr.as_ref() }.parent.is_none() {
+            unsafe { curr.as_mut() }.color = Color::Black;
+            unsafe { *root = Some(curr) };
+        }
         }
 
     fn map_rotations(parent: Direction, child: Direction) -> (Direction, Option<Direction>) {
@@ -552,17 +564,17 @@ impl<K: Ord, T> Drop for TreeNode<K, T> {
 
 impl<K: Ord + Debug, T: Debug> Debug for TreeNode<K, T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        if let Some(left) = self.left {
-            f.write_str("left child:\n")?;
-            unsafe { left.as_ref() }.fmt(f)?;
-        }
-        if let Some(right) = self.right {
-            f.write_str("right child:\n")?;
-            unsafe { right.as_ref() }.fmt(f)?;
-        }
         println!("color: {:?}", self.color);
         println!("key: {:?}", self.key);
         println!("val: {:?}", self.val);
+        if let Some(left) = self.left {
+            f.write_str(format!("left child of {:?}:\n", self.key).as_str())?;
+            unsafe { left.as_ref() }.fmt(f)?;
+        }
+        if let Some(right) = self.right {
+            f.write_str(format!("right child of {:?}:\n", self.key).as_str())?;
+            unsafe { right.as_ref() }.fmt(f)?;
+        }
         Ok(())
     }
 }

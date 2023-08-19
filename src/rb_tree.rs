@@ -146,21 +146,6 @@ impl<K: Ord, T> TreeNode<K, T> {
         Direction::Right
     }
 
-    fn rotate_left(&mut self) {
-        unsafe { self.right.unwrap().as_mut() }.parent = self.parent;
-        if let Some(mut parent) = self.parent {
-            if unsafe { parent.as_ref() }.left == Some(unsafe { NonNull::new_unchecked(self as *mut TreeNode<K, T>) }) {
-                unsafe { parent.as_mut() }.left = self.right;
-            } else {
-                unsafe { parent.as_mut() }.right = self.right;
-            }
-        }
-        self.parent = self.right;
-        let old_right = unsafe { self.right.unwrap().as_ref() }.left;
-        unsafe { self.right.unwrap().as_mut() }.left = Some(unsafe { NonNull::new_unchecked(self as *mut TreeNode<K, T>) });
-        self.right = old_right;
-    }
-
     fn rot_left_par(&mut self) {
         let left = self.left;
         self.left = self.parent;
@@ -202,21 +187,6 @@ impl<K: Ord, T> TreeNode<K, T> {
             unsafe { parent.as_mut() }.parent = Some(unsafe { NonNull::new_unchecked(self as *mut TreeNode<K, T>) });
             self.parent = new_parent;
         }
-    }
-
-    fn rotate_right(&mut self) {
-        unsafe { self.left.unwrap().as_mut() }.parent = self.parent;
-        if let Some(mut parent) = self.parent {
-            if unsafe { parent.as_ref() }.left == Some(unsafe { NonNull::new_unchecked(self as *mut TreeNode<K, T>) }) {
-                unsafe { parent.as_mut() }.left = self.left;
-            } else {
-                unsafe { parent.as_mut() }.right = self.left;
-            }
-        }
-        self.parent = self.left;
-        let old_left = unsafe { self.left.unwrap().as_ref() }.right;
-        unsafe { self.left.unwrap().as_mut() }.right = Some(unsafe { NonNull::new_unchecked(self as *mut TreeNode<K, T>) });
-        self.left = old_left;
     }
 
     fn insert(mut slf: NonNull<Self>, root: *mut Option<NonNull<TreeNode<K, T>>>, key: K, value: T) {
@@ -275,97 +245,6 @@ impl<K: Ord, T> TreeNode<K, T> {
                 }
             }
         }
-    }
-
-    fn recolor(node: NonNull<TreeNode<K, T>>) {
-        let mut curr = node;
-        let mut run = 0;
-        while let Some(mut parent) = unsafe { curr.as_mut() }.parent {
-            println!("runs: {}", run);
-            run += 1;
-            // try recoloring until parent is red
-            if unsafe { parent.as_ref() }.color == Color::Red {
-                println!("parent is red!");
-                break;
-            }
-            if let Some(mut gp) = unsafe { parent.as_ref() }.parent {
-                println!("p1");
-                if unsafe { gp.as_ref() }.left == Some(parent) {
-                    println!("p2");
-                    if let Some(mut uncle) = unsafe { gp.as_ref() }.right {
-                        println!("p3");
-                        if unsafe { uncle.as_ref() }.color == Color::Red {
-                            println!("p4");
-                            // pull the color of grandparent down to its children which corrects their color property
-                            // from the viewpoint of the new node (but invalidates the color property of the grandparent)
-                            unsafe { uncle.as_mut() }.color = Color::Black;
-                            unsafe { parent.as_mut() }.color = Color::Black;
-                            unsafe { gp.as_mut() }.color = Color::Red;
-                            // ... so now we have to fix uo grand parent
-                            curr = gp;
-                        } else {
-                            // the uncle's color is already correct, so the parent's is probably as well?
-                            break;
-                        }
-                    } else {
-                        // no uncle is present, so, idk?
-                        break;
-                    }
-                } else if unsafe { parent.as_ref() }.right == Some(node) {
-                    println!("p5");
-                    curr = parent;
-                    unsafe { curr.as_mut() }.rotate_left();
-                    if let Some(mut parent) = unsafe { curr.as_ref() }.parent {
-                        if let Some(mut gp) = unsafe { parent.as_ref() }.parent {
-                            unsafe { gp.as_mut() }.color = Color::Red;
-                            unsafe { parent.as_mut() }.color = Color::Black;
-                            unsafe { gp.as_mut() }.rotate_right();
-                        } else {
-                            // no grand parent present, so idk?
-                            break;
-                        }
-                    } else {
-                        // no parent present, so idk?
-                        break;
-                    }
-                } else {
-                    println!("p6");
-                    if let Some(mut gp) = unsafe { parent.as_ref() }.parent {
-                        println!("p7");
-                        if unsafe { gp.as_ref() }.left.map(|child| unsafe { child.as_ref() }.color).unwrap_or(Color::Red) == Color::Red {
-                            println!("p8");
-                            if let Some(mut left) = unsafe { gp.as_mut() }.left {
-                                unsafe { left.as_mut() }.color = Color::Black;
-                            }
-                            if let Some(mut right) = unsafe { gp.as_mut() }.right {
-                                unsafe { right.as_mut() }.color = Color::Black;
-                            }
-                            unsafe { gp.as_mut() }.color = Color::Red;
-                            curr = gp;
-                        } else if unsafe { gp.as_ref() }.left == Some(curr) {
-                            println!("p9");
-                            curr = parent;
-                            unsafe { curr.as_mut() }.rotate_right();
-                            unsafe { parent.as_mut() }.color = Color::Black;
-                            unsafe { gp.as_mut() }.color = Color::Red;
-                            unsafe { gp.as_mut() }.rotate_left();
-                        }
-                    } else {
-                        // no grand parent present, so idk?
-                        break;
-                    }
-                }
-            } else {
-                // we have no parent, so we can't fix anybody up anymore.
-                break;
-            }
-        }
-        // FIXME: recolor root node as black!
-        let mut maybe_root = node;
-        while let Some(parent) = unsafe { maybe_root.as_ref() }.parent {
-            maybe_root = parent;
-        }
-        unsafe { maybe_root.as_mut() }.color = Color::Black;
     }
 
     fn recolor_2(node: NonNull<TreeNode<K, T>>, root: *mut Option<NonNull<TreeNode<K, T>>>) {

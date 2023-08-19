@@ -166,16 +166,27 @@ impl<K: Ord, T> TreeNode<K, T> {
         self.left = self.parent;
         if let Some(mut left) = left {
             unsafe { left.as_mut() }.parent = self.parent;
+            println!("rl 0");
         }
         if let Some(mut parent) = self.parent {
-            assert_eq!(unsafe { parent.as_ref() }.child_dir(unsafe { NonNull::new_unchecked(self as *mut TreeNode<K, T>) }), Direction::Right);
+            let this = unsafe { NonNull::new_unchecked(self as *mut TreeNode<K, T>) };
+            assert_eq!(unsafe { parent.as_ref() }.child_dir(this), Direction::Right);
             unsafe { parent.as_mut() }.right = left;
             let new_parent = unsafe { parent.as_ref() }.parent;
-            unsafe { parent.as_mut() }.parent = Some(unsafe { NonNull::new_unchecked(self as *mut TreeNode<K, T>) });
+            unsafe { parent.as_mut() }.parent = Some(this);
             self.parent = new_parent;
+            if let Some(mut new_parent) = new_parent {
+                if unsafe { new_parent.as_ref() }.child_dir(parent) == Direction::Left {
+                    unsafe { new_parent.as_mut().left = Some(this); }
+                } else {
+                    unsafe { new_parent.as_mut().right = Some(this); }
+                }
+            }
+            println!("rl 1 {:?}", new_parent);
         } else {
             self.parent = None;
             assert!(left.is_none());
+            println!("rl 2");
         }
     }
 
